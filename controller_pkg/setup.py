@@ -14,6 +14,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -31,6 +32,7 @@ setup(
             'time_trial_controller = controller_pkg.time_trial_controller:main',
             'drone_teleop = controller_pkg.drone_teleop:main',
             'drone_time_trial = controller_pkg.drone_time_trial:main',
+            'drone_road_follower = controller_pkg.drone_road_follower:main',
         ],
     },
 )

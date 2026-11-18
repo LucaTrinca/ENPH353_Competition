@@ -17,10 +17,13 @@
  *   - Roll and pitch are held level with a PD torque controller.
  *   - If no command is received for <cmd_timeout> seconds the force command
  *     is zeroed, so the drone hovers (it stays armed).
+ *   - Any message on the reset topic (gz.msgs.Empty) teleports the drone back
+ *     to its spawn pose, zeroes its velocity and disarms it.
  *
  * SDF parameters (all optional):
  *   <link_name>chassis</link_name>
  *   <topic>/model/<model_name>/cmd_vel</topic>
+ *   <reset_topic>/model/<model_name>/reset</reset_topic>
  *   <cmd_timeout>0.5</cmd_timeout>
  *   <max_force>20</max_force>
  *   <linear_drag>1.0</linear_drag>    N per m/s
@@ -36,6 +39,7 @@
 #include <gz/math/Pose3.hh>
 #include <gz/math/Quaternion.hh>
 #include <gz/math/Vector3.hh>
+#include <gz/msgs/empty.pb.h>
 #include <gz/msgs/twist.pb.h>
 #include <gz/plugin/Register.hh>
 #include <gz/sim/Link.hh>
@@ -43,7 +47,10 @@
 #include <gz/sim/System.hh>
 #include <gz/sim/Util.hh>
 #include <gz/sim/components/Gravity.hh>
+#include <gz/sim/components/AngularVelocityCmd.hh>
 #include <gz/sim/components/Inertial.hh>
+#include <gz/sim/components/LinearVelocityCmd.hh>
+#include <gz/sim/components/PoseCmd.hh>
 #include <gz/transport/Node.hh>
 
 namespace drone_plugins
@@ -77,6 +84,10 @@ public:
     this->linearDrag = _sdf->Get<double>("linear_drag", 1.0).first;
     const std::string topic = _sdf->Get<std::string>(
       "topic", "/model/" + model.Name(_ecm) + "/cmd_vel").first;
+    const std::string resetTopic = _sdf->Get<std::string>(
+      "reset_topic", "/model/" + model.Name(_ecm) + "/reset").first;
+
+    this->modelEntity = _entity;
 
     this->link = gz::sim::Link(model.LinkByName(_ecm, linkName));
     if (!this->link.Valid(_ecm))
@@ -95,10 +106,11 @@ public:
     this->gravity = gravity ? gravity->Data() : gz::math::Vector3d(0, 0, -9.8);
 
     this->node.Subscribe(topic, &DroneForceController::OnCmd, this);
+    this->node.Subscribe(resetTopic, &DroneForceController::OnReset, this);
     this->valid = true;
 
     gzmsg << "DroneForceController: link [" << linkName << "], mass " << this->mass
-          << " kg, listening on [" << topic << "]" << std::endl;
+          << " kg, listening on [" << topic << "], reset on [" << resetTopic << "]" << std::endl;
   }
 
   void PreUpdate(const gz::sim::UpdateInfo &_info,
@@ -107,12 +119,32 @@ public:
     if (!this->valid || _info.paused)
       return;
 
+    // Record the spawn pose the reset returns to. Not done in Configure: when a
+    // model is spawned with the create service its pose is set after Configure.
+    if (!this->spawnRecorded)
+    {
+      this->spawnPose = gz::sim::worldPose(this->modelEntity, _ecm);
+      this->spawnRecorded = true;
+      gzmsg << "DroneForceController: spawn pose [" << this->spawnPose << "]" << std::endl;
+    }
+
     const double now = std::chrono::duration<double>(_info.simTime).count();
+
+    // Velocity commands from a reset only need to act for one step
+    if (this->clearVelocityCmds)
+    {
+      _ecm.RemoveComponent<gz::sim::components::LinearVelocityCmd>(this->link.Entity());
+      _ecm.RemoveComponent<gz::sim::components::AngularVelocityCmd>(this->link.Entity());
+      this->clearVelocityCmds = false;
+    }
 
     gz::math::Vector3d forceCmd;
     double yawRateCmd = 0.0;
+    bool reset = false;
     {
       std::lock_guard<std::mutex> lock(this->mutex);
+      reset = this->resetRequested;
+      this->resetRequested = false;
       if (this->newCmd)
       {
         this->lastCmdTime = now;
@@ -123,6 +155,17 @@ public:
         forceCmd = this->cmdForce;
         yawRateCmd = this->cmdYawRate;
       }
+    }
+
+    if (reset)
+    {
+      _ecm.SetComponentData<gz::sim::components::WorldPoseCmd>(this->modelEntity, this->spawnPose);
+      this->link.SetLinearVelocity(_ecm, gz::math::Vector3d::Zero);
+      this->link.SetAngularVelocity(_ecm, gz::math::Vector3d::Zero);
+      this->clearVelocityCmds = true;
+      this->armed = false;
+      gzmsg << "DroneForceController: reset to spawn pose [" << this->spawnPose << "]" << std::endl;
+      return;
     }
 
     if (forceCmd.Z() > 0.0)
@@ -166,10 +209,26 @@ private:
     this->newCmd = true;
   }
 
+  void OnReset(const gz::msgs::Empty &)
+  {
+    std::lock_guard<std::mutex> lock(this->mutex);
+    this->resetRequested = true;
+    // Drop the last command so the drone stays disarmed until a new up command
+    this->cmdForce.Set(0, 0, 0);
+    this->cmdYawRate = 0.0;
+    this->lastCmdTime = -1e9;
+    this->newCmd = false;
+  }
+
   gz::transport::Node node;
   gz::sim::Link link;
   bool valid = false;
   bool armed = false;
+
+  gz::sim::Entity modelEntity = gz::sim::kNullEntity;
+  gz::math::Pose3d spawnPose;
+  bool spawnRecorded = false;
+  bool clearVelocityCmds = false;
 
   double mass = 1.0;
   gz::math::Vector3d moi{1, 1, 1};
@@ -187,6 +246,7 @@ private:
   double cmdYawRate = 0.0;
   bool newCmd = false;
   double lastCmdTime = -1e9;
+  bool resetRequested = false;
 };
 
 }  // namespace drone_plugins

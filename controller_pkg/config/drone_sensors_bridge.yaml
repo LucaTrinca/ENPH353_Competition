@@ -1,0 +1,31 @@
+# Drone sensors (and the drone reset) that the competition bridge (my_robot_bringup)
+# does not include.
+# The front camera (/camera/image_raw) and /cmd_vel are bridged by the competition launch.
+
+# Downward-facing navigation camera
+- ros_topic_name: "/down_camera/image_raw"
+  gz_topic_name: "/down_camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+# Altimeter (height relative to the spawn height)
+- ros_topic_name: "/altimeter"
+  gz_topic_name: "/altimeter"
+  ros_type_name: "ros_gz_interfaces/msg/Altimeter"
+  gz_type_name: "gz.msgs.Altimeter"
+  direction: GZ_TO_ROS
+
+# IMU
+- ros_topic_name: "/imu"
+  gz_topic_name: "/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+# Reset the drone to its spawn pose (handled by the DroneForceController plugin)
+- ros_topic_name: "/drone/reset"
+  gz_topic_name: "/model/my_robot/reset"
+  ros_type_name: "std_msgs/msg/Empty"
+  gz_type_name: "gz.msgs.Empty"
+  direction: ROS_TO_GZ

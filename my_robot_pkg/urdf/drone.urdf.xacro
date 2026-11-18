@@ -6,7 +6,7 @@
 
          Competition robot design rules
            - collision box 0.30 x 0.30 x 0.08 m (min 0.15 x 0.20 x 0.05, max 0.5 x 0.5 x 0.5)
-           - total mass 1.01 kg (0.5 - 20 kg), every link >= 0.01 kg
+           - total mass 1.02 kg (0.5 - 20 kg), every link >= 0.01 kg
            - wind enabled on the chassis link (flying robot)
            - camera Gaussian noise stddev >= 0.007 -->
 
@@ -105,6 +105,27 @@
         <parent link="chassis" />
         <child link="camera_link" />
         <origin xyz="${chassis_length / 2.0} 0 ${chassis_height / 2.0}" rpy="0 ${camera_pitch} 0" />
+    </joint>
+
+    <!-- Downward-facing navigation camera under the centre of the chassis -->
+    <link name="down_camera_link">
+        <xacro:box_inertia m="0.01" x="${camera_side_length}" y="${camera_side_length}"
+        z="${camera_side_length}" o_xyz="0 0 0" o_rpy="0 0 0" />
+
+        <visual>
+            <geometry>
+                <box size="${camera_side_length} ${camera_side_length} ${camera_side_length}" />
+            </geometry>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <material name="gray" />
+        </visual>
+    </link>
+
+    <!-- Pitch +90 deg so the camera's optical (+x) axis points straight down -->
+    <joint name="chassis_down_camera_joint" type="fixed">
+        <parent link="chassis" />
+        <child link="down_camera_link" />
+        <origin xyz="0 0 0.01" rpy="0 ${pi / 2.0} 0" />
     </joint>
 
 </robot>

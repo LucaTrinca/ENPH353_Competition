@@ -10,6 +10,7 @@ is focused, hold:
     Q / E       rotate left (CCW) / right (CW)
 Press:
     L           save the current camera image (PNG) to <save_dir>
+    R           reset the drone to its spawn pose (on /drone/reset)
 
 Publishes force commands on /cmd_vel (geometry_msgs/Twist, forces in N):
     linear.x = forward, linear.y = left, linear.z = up
@@ -28,6 +29,7 @@ from PIL import Image as PILImage
 from PIL import ImageTk
 from rclpy.node import Node
 from sensor_msgs.msg import Image, Imu
+from std_msgs.msg import Empty
 
 
 class DroneTeleop(Node):
@@ -45,6 +47,7 @@ class DroneTeleop(Node):
         self.save_dir = os.path.expanduser(self.get_parameter('save_dir').value)
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 1)
+        self.reset_pub = self.create_publisher(Empty, '/drone/reset', 1)
         self.create_subscription(Image, '/camera/image_raw', self.image_callback, 1)
         self.create_subscription(Imu, '/imu', self.imu_callback, 1)
 
@@ -78,6 +81,10 @@ class DroneTeleop(Node):
         self.get_logger().info(f'Saved camera image: {path}')
         return path
 
+    def reset_drone(self):
+        self.reset_pub.publish(Empty())
+        self.get_logger().info('Requested drone reset to spawn pose')
+
 
 class TeleopWindow:
 
@@ -100,7 +107,7 @@ class TeleopWindow:
         self.info.pack(fill=tk.X, padx=8, pady=4)
         tk.Label(self.root, text='W/S forward/back   A/D left/right   '
                                  'Space up   Ctrl down   Q/E rotate   L save image   '
-                                 '(keep this window focused)'
+                                 'R reset   (keep this window focused)'
                  ).pack(pady=(0, 6))
         self.save_status = 'No images saved yet'
 
@@ -127,6 +134,8 @@ class TeleopWindow:
         if key == 'l' and key not in self.pressed:
             path = self.node.save_frame()
             self.save_status = f'Saved {path}' if path else 'No camera image to save yet'
+        if key == 'r' and key not in self.pressed:
+            self.node.reset_drone()
         self.pressed.add(key)
 
     def on_release(self, event):

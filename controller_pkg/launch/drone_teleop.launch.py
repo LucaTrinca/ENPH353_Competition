@@ -1,14 +1,20 @@
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    bridge_config = (Path(get_package_share_directory('controller_pkg'))
+                     / 'config' / 'drone_sensors_bridge.yaml')
+
     return LaunchDescription([
-        # The competition bridge doesn't include the IMU, so bridge it here
+        # Down camera, altimeter and IMU (not in the competition bridge)
         Node(
             package='ros_gz_bridge',
             executable='parameter_bridge',
-            arguments=['/imu@sensor_msgs/msg/Imu[gz.msgs.IMU'],
+            parameters=[{'config_file': bridge_config.as_posix()}],
             output='screen',
         ),
         Node(

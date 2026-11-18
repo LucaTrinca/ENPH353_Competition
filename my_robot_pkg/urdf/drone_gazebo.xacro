@@ -1,7 +1,15 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+    <!-- Sensor suite
+           - front camera (clues)      /camera/image_raw       720x480, 5 Hz
+           - down camera (navigation)  /down_camera/image_raw  320x240, 15 Hz
+           - altimeter                 /altimeter              height relative to spawn
+           - IMU                       /imu -->
     <xacro:property name="FOV" value="60" />
+    <!-- Wide enough to see ~1.4 m of ground at a 0.3 m hover. Looking straight
+         down at flat ground a wide FOV only changes the scale, not the shape -->
+    <xacro:property name="DOWN_FOV" value="134" />
 
     <!-- Force controller - /cmd_vel (bridged to /model/my_robot/cmd_vel) is read as
          linear.x/y/z = forward/left/up force [N], angular.z = yaw rate [rad/s] -->
@@ -12,13 +20,20 @@
             <link_name>chassis</link_name>
             <cmd_timeout>0.5</cmd_timeout>
             <max_force>20</max_force>
-            <linear_drag>1.0</linear_drag>
+            <!-- 0 with wind on - the wind plugin already applies air drag
+                 (1 N per m/s relative to the air). Use 1.0 if wind is off. -->
+            <linear_drag>0.0</linear_drag>
         </plugin>
     </gazebo>
 
-    <!-- Required for the IMU sensor below to publish -->
+    <!-- Required for the IMU and altimeter sensors below to publish -->
     <gazebo>
         <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
+        </plugin>
+    </gazebo>
+
+    <gazebo>
+        <plugin filename="gz-sim-altimeter-system" name="gz::sim::systems::Altimeter">
         </plugin>
     </gazebo>
 
@@ -35,11 +50,9 @@
         </plugin>
     </gazebo>
 
-    <!-- Wind disabled for now. NOTE - the competition rules require
-         enable_wind true on the chassis of a flying robot, so turn this
-         back on before the competition -->
+    <!-- Flying robot rule - wind must be enabled on the chassis -->
     <gazebo reference="chassis">
-        <enable_wind>false</enable_wind>
+        <enable_wind>true</enable_wind>
 
         <sensor type="imu" name="imu_sensor">
             <always_on>1</always_on>
@@ -58,6 +71,51 @@
                     <z><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></z>
                 </linear_acceleration>
             </imu>
+        </sensor>
+
+        <!-- 1D height relative to the spawn height (vertical_position) -->
+        <sensor type="altimeter" name="altimeter_sensor">
+            <always_on>1</always_on>
+            <update_rate>30</update_rate>
+            <visualize>false</visualize>
+            <topic>altimeter</topic>
+            <altimeter>
+                <vertical_position>
+                    <noise type="gaussian"><mean>0</mean><stddev>0.01</stddev></noise>
+                </vertical_position>
+                <vertical_velocity>
+                    <noise type="gaussian"><mean>0</mean><stddev>0.01</stddev></noise>
+                </vertical_velocity>
+            </altimeter>
+        </sensor>
+    </gazebo>
+
+    <!-- Navigation camera - low resolution, used only for road following.
+         Image top = drone forward, image left = drone left. -->
+    <gazebo reference="down_camera_link">
+        <sensor type="camera" name="down_camera">
+            <pose relative_to='down_camera_link'>0 0 0 0 0 0</pose>
+            <camera>
+                <horizontal_fov>${DOWN_FOV * pi / 180}</horizontal_fov>
+                <image>
+                    <width>320</width>
+                    <height>240</height>
+                </image>
+                <clip>
+                    <near>0.1</near>
+                    <far>100</far>
+                </clip>
+                <!-- Custom camera rule - Gaussian noise, mean 0, stddev >= 0.007 -->
+                <noise>
+                    <type>gaussian</type>
+                    <mean>0.0</mean>
+                    <stddev>0.007</stddev>
+                </noise>
+            </camera>
+            <always_on>1</always_on>
+            <update_rate>15</update_rate>
+            <visualize>true</visualize>
+            <topic>down_camera/image_raw</topic>
         </sensor>
     </gazebo>
 
@@ -82,7 +140,8 @@
                 </noise>
             </camera>
             <always_on>1</always_on>
-            <update_rate>15</update_rate>
+            <!-- Low rate - only needed when reading a clue board -->
+            <update_rate>5</update_rate>
             <visualize>true</visualize>
             <topic>camera/image_raw</topic>
         </sensor>
