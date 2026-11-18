@@ -1,0 +1,110 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- Quadcopter-style drone - a single rigid "chassis" body flown with
+         force commands by the DroneForceController plugin (drone_plugins).
+
+         Competition robot design rules
+           - collision box 0.30 x 0.30 x 0.08 m (min 0.15 x 0.20 x 0.05, max 0.5 x 0.5 x 0.5)
+           - total mass 1.01 kg (0.5 - 20 kg), every link >= 0.01 kg
+           - wind enabled on the chassis link (flying robot)
+           - camera Gaussian noise stddev >= 0.007 -->
+
+    <xacro:property name="chassis_length" value="0.30" />
+    <xacro:property name="chassis_width" value="0.30" />
+    <xacro:property name="chassis_height" value="0.08" />
+    <xacro:property name="chassis_mass" value="1.0" />
+
+    <xacro:property name="rotor_radius" value="0.06" />
+    <xacro:property name="rotor_offset" value="0.105" />
+
+    <xacro:property name="camera_side_length" value="0.03" />
+    <xacro:property name="camera_pitch" value="0.0" /> <!-- rad, positive tilts the camera down -->
+
+    <xacro:include filename="$(find my_robot_pkg)/urdf/drone_gazebo.xacro" />
+
+    <material name="dark_gray">
+        <color rgba="0.2 0.2 0.2 1" />
+    </material>
+
+    <material name="orange">
+        <color rgba="1.0 0.5 0.0 1" />
+    </material>
+
+    <material name="gray">
+        <color rgba="0.7 0.7 0.7 1" />
+    </material>
+
+    <xacro:macro name="rotor_visual" params="x y">
+        <visual>
+            <origin xyz="${x} ${y} ${chassis_height - 0.01}" rpy="0 0 0" />
+            <geometry>
+                <cylinder radius="${rotor_radius}" length="0.005" />
+            </geometry>
+            <material name="orange" />
+        </visual>
+    </xacro:macro>
+
+    <link name="chassis">
+        <xacro:box_inertia m="${chassis_mass}" x="${chassis_length}" y="${chassis_width}"
+        z="${chassis_height}" o_xyz="0 0 ${chassis_height / 2.0}" o_rpy="0 0 0" />
+
+        <collision>
+            <origin xyz="0 0 ${chassis_height / 2.0}" rpy="0 0 0" />
+            <geometry>
+                <box size="${chassis_length} ${chassis_width} ${chassis_height}" />
+            </geometry>
+        </collision>
+
+        <!-- Central body -->
+        <visual>
+            <origin xyz="0 0 ${chassis_height / 2.0}" rpy="0 0 0" />
+            <geometry>
+                <box size="0.12 0.10 0.05" />
+            </geometry>
+            <material name="dark_gray" />
+        </visual>
+
+        <!-- Arms (X configuration) -->
+        <visual>
+            <origin xyz="0 0 ${chassis_height / 2.0}" rpy="0 0 ${pi / 4.0}" />
+            <geometry>
+                <box size="${2.0 * rotor_offset * sqrt(2.0)} 0.02 0.015" />
+            </geometry>
+            <material name="dark_gray" />
+        </visual>
+        <visual>
+            <origin xyz="0 0 ${chassis_height / 2.0}" rpy="0 0 ${-pi / 4.0}" />
+            <geometry>
+                <box size="${2.0 * rotor_offset * sqrt(2.0)} 0.02 0.015" />
+            </geometry>
+            <material name="dark_gray" />
+        </visual>
+
+        <!-- Rotors -->
+        <xacro:rotor_visual x="${rotor_offset}" y="${rotor_offset}" />
+        <xacro:rotor_visual x="${rotor_offset}" y="${-rotor_offset}" />
+        <xacro:rotor_visual x="${-rotor_offset}" y="${rotor_offset}" />
+        <xacro:rotor_visual x="${-rotor_offset}" y="${-rotor_offset}" />
+    </link>
+
+    <link name="camera_link">
+        <xacro:box_inertia m="0.01" x="${camera_side_length}" y="${camera_side_length}"
+        z="${camera_side_length}" o_xyz="${camera_side_length / 2} 0 0" o_rpy="0 0 0" />
+
+        <visual>
+            <geometry>
+                <box size="${camera_side_length} ${camera_side_length} ${camera_side_length}" />
+            </geometry>
+            <origin xyz="${camera_side_length / 2} 0 0" rpy="0 0 0" />
+            <material name="gray" />
+        </visual>
+    </link>
+
+    <joint name="chassis_camera_joint" type="fixed">
+        <parent link="chassis" />
+        <child link="camera_link" />
+        <origin xyz="${chassis_length / 2.0} 0 ${chassis_height / 2.0}" rpy="0 ${camera_pitch} 0" />
+    </joint>
+
+</robot>

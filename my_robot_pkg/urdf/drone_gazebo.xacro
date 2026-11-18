@@ -1,0 +1,90 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <xacro:property name="FOV" value="60" />
+
+    <!-- Force controller - /cmd_vel (bridged to /model/my_robot/cmd_vel) is read as
+         linear.x/y/z = forward/left/up force [N], angular.z = yaw rate [rad/s] -->
+    <gazebo>
+        <!-- Full path so Gazebo finds the plugin without relying on GZ_SIM_SYSTEM_PLUGIN_PATH -->
+        <plugin filename="$(find drone_plugins)/../../lib/libDroneForceController.so"
+            name="drone_plugins::DroneForceController">
+            <link_name>chassis</link_name>
+            <cmd_timeout>0.5</cmd_timeout>
+            <max_force>20</max_force>
+            <linear_drag>1.0</linear_drag>
+        </plugin>
+    </gazebo>
+
+    <!-- Required for the IMU sensor below to publish -->
+    <gazebo>
+        <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
+        </plugin>
+    </gazebo>
+
+    <gazebo>
+        <plugin filename="gz-sim-pose-publisher-system"
+            name="gz::sim::systems::PosePublisher">
+            <publish_model_pose>true</publish_model_pose>
+            <publish_link_pose>false</publish_link_pose>
+            <publish_sensor_pose>false</publish_sensor_pose>
+            <publish_collision_pose>false</publish_collision_pose>
+            <publish_visual_pose>false</publish_visual_pose>
+            <update_frequency>50</update_frequency>
+            <use_pose_vector_msg>false</use_pose_vector_msg>
+        </plugin>
+    </gazebo>
+
+    <!-- Wind disabled for now. NOTE - the competition rules require
+         enable_wind true on the chassis of a flying robot, so turn this
+         back on before the competition -->
+    <gazebo reference="chassis">
+        <enable_wind>false</enable_wind>
+
+        <sensor type="imu" name="imu_sensor">
+            <always_on>1</always_on>
+            <update_rate>100</update_rate>
+            <visualize>false</visualize>
+            <topic>imu</topic>
+            <imu>
+                <angular_velocity>
+                    <x><noise type="gaussian"><mean>0</mean><stddev>0.002</stddev></noise></x>
+                    <y><noise type="gaussian"><mean>0</mean><stddev>0.002</stddev></noise></y>
+                    <z><noise type="gaussian"><mean>0</mean><stddev>0.002</stddev></noise></z>
+                </angular_velocity>
+                <linear_acceleration>
+                    <x><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></x>
+                    <y><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></y>
+                    <z><noise type="gaussian"><mean>0</mean><stddev>0.017</stddev></noise></z>
+                </linear_acceleration>
+            </imu>
+        </sensor>
+    </gazebo>
+
+    <gazebo reference="camera_link">
+        <sensor type="camera" name="front_camera">
+            <pose relative_to='camera_link'>0 0 0 0 0 0</pose>
+            <camera>
+                <horizontal_fov>${FOV * pi / 180}</horizontal_fov>
+                <image>
+                    <width>720</width>
+                    <height>480</height>
+                </image>
+                <clip>
+                    <near>0.1</near>
+                    <far>100</far>
+                </clip>
+                <!-- Custom camera rule - Gaussian noise, mean 0, stddev >= 0.007 -->
+                <noise>
+                    <type>gaussian</type>
+                    <mean>0.0</mean>
+                    <stddev>0.007</stddev>
+                </noise>
+            </camera>
+            <always_on>1</always_on>
+            <update_rate>15</update_rate>
+            <visualize>true</visualize>
+            <topic>camera/image_raw</topic>
+        </sensor>
+    </gazebo>
+</robot>

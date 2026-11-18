@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<robot name="my_robot" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- Select the robot: "drone" (default) or "car" (original differential drive robot)
+         e.g. xacro my_robot.urdf.xacro robot_type:=car -->
+    <xacro:arg name="robot_type" default="drone" />
+
+    <xacro:include filename="$(find my_robot_pkg)/urdf/common_properties.xacro" />
+
+    <xacro:if value="${'$(arg robot_type)' == 'drone'}">
+        <xacro:include filename="$(find my_robot_pkg)/urdf/drone.urdf.xacro" />
+    </xacro:if>
+
+    <xacro:if value="${'$(arg robot_type)' == 'car'}">
+        <xacro:include filename="$(find my_robot_pkg)/urdf/car.urdf.xacro" />
+    </xacro:if>
+
+</robot>

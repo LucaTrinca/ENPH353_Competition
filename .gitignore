@@ -1,0 +1,11 @@
+# Upstream competition repo - clone it separately from ENPH353
+2026_competition/
+
+# Python
+__pycache__/
+*.pyc
+
+# colcon output (in case it's ever run from src)
+build/
+install/
+log/
