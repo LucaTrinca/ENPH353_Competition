@@ -7,8 +7,11 @@ altimeter. Stops the timer after <follow_duration> sim seconds and keeps
 hovering in place (the drone never lands: every ground contact is a -5 pt
 penalty).
 
-Start this node with the drone on the ground: the first altimeter reading is
-taken as ground level, so altitudes are heights above the ground.
+Height above the ground comes from the downward range sensor (a tiny depth
+camera pointing straight down), which also follows the terrain. When it has no valid
+reading (on the ground, or out of range) the altimeter is used instead. Start
+this node with the drone on the ground: the first altimeter reading is taken
+as ground level, so the altimeter fallback is also a height above the ground.
 
 Wind pushes the drone around, so the horizontal control uses the drone's
 velocity over the ground, measured with optical flow on the down camera
@@ -30,13 +33,14 @@ into the wind velocity using the optical-flow ground velocity. The force that
 cancels the wind (but not the drone's own air drag) is added to the commands
 in real time, so the PID terms only have to correct what is left.
 
-Topics used: /clock, /down_camera/image_raw, /altimeter, /imu (sub),
+Topics used: /clock, /down_camera/image_raw, /down_depth, /altimeter, /imu (sub),
              /camera/image_raw (sub, display only, if show_front_camera),
              /cmd_vel, /score_tracker, /drone/wind (pub).
 """
 import math
 
 import cv2
+import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist, Vector3Stamped
@@ -89,7 +93,9 @@ class DroneRoadFollower(Node):
         self.declare_parameter('wind_feedforward', True)    # cancel the measured wind
         self.declare_parameter('wind_ff_gain', 1.0)         # fraction of the wind force cancelled
         self.declare_parameter('wind_filter_tau', 0.3)      # s, wind sensor low-pass filter
-        self.declare_parameter('drone_mass', 1.02)          # kg, must match the URDF
+        self.declare_parameter('drone_mass', 1.03)          # kg, must match the URDF
+        self.declare_parameter('use_range_sensor', True)    # height from the downward depth sensor
+        self.declare_parameter('range_timeout', 0.3)        # s, older readings fall back to the altimeter
         self.declare_parameter('air_drag_coeff', 1.0)       # N per m/s, wind plugin scaling factor
         self.declare_parameter('max_total_horizontal_force', 8.0)  # N, PID + feedforward
 
@@ -113,6 +119,8 @@ class DroneRoadFollower(Node):
         self.show_debug = bool(p('show_debug'))
         self.show_front_camera = bool(p('show_front_camera'))
         self.wind_feedforward = bool(p('wind_feedforward'))
+        self.use_range_sensor = bool(p('use_range_sensor'))
+        self.range_timeout = float(p('range_timeout'))
         self.wind_ff_gain = float(p('wind_ff_gain'))
         self.max_total_horizontal_force = float(p('max_total_horizontal_force'))
 
@@ -131,6 +139,7 @@ class DroneRoadFollower(Node):
         self.create_subscription(Clock, '/clock', self.clock_callback, 1)
         self.create_subscription(Altimeter, '/altimeter', self.altimeter_callback, 1)
         self.create_subscription(Imu, '/imu', self.imu_callback, 10)
+        self.create_subscription(Image, '/down_depth', self.range_callback, 1)
         self.wind_pub = self.create_publisher(Vector3Stamped, '/drone/wind', 1)
         self.create_subscription(Image, '/down_camera/image_raw', self.image_callback, 1)
         if self.show_front_camera:
@@ -146,8 +155,10 @@ class DroneRoadFollower(Node):
         self.state = 'WAIT_CLOCK'
         self.state_start_time = None
 
-        self.altitude = None
+        self.altitude = None      # height above the ground from the altimeter
         self.ground_level = None  # altimeter reading on the ground at startup
+        self.range_height = None  # height above the ground from the downward depth sensor
+        self.range_time = None
         self.target_altitude = self.cruise_altitude
         self.last_control_time = None
 
@@ -178,6 +189,28 @@ class DroneRoadFollower(Node):
             self.get_logger().info(f'Ground level: altimeter {self.ground_level:+.3f} m')
         self.altitude = msg.vertical_position - self.ground_level
 
+    def range_callback(self, msg):
+        # Depth image in metres; pixels with nothing in range (e.g. closer than the
+        # 0.1 m near clip while on the ground) are inf. The view is narrow
+        # (0.2 rad), so the depth is the vertical distance.
+        depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+        valid = depth[np.isfinite(depth)]
+        if valid.size:
+            self.range_height = float(np.median(valid))
+            self.range_time = self.sim_time
+
+    def height_reading(self):
+        """(height above the ground [m], source): the downward depth sensor if it
+        has a fresh reading, otherwise the altimeter."""
+        if (self.use_range_sensor and self.range_height is not None
+                and self.range_time is not None and self.sim_time is not None
+                and self.sim_time - self.range_time <= self.range_timeout):
+            return self.range_height, 'range'
+        return self.altitude, 'altimeter'
+
+    def height(self):
+        return self.height_reading()[0]
+
     def image_callback(self, msg):
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         if self.velocity is None:
@@ -188,7 +221,7 @@ class DroneRoadFollower(Node):
             self.show_debug_window(frame)
 
     def flying(self):
-        return (self.altitude is not None and self.altitude > 0.1
+        return (self.height() is not None and self.height() > 0.1
                 and self.state in ('CLIMB', 'FOLLOW', 'HOVER', 'DONE'))
 
     def imu_callback(self, msg):
@@ -218,7 +251,7 @@ class DroneRoadFollower(Node):
         dt = 0.0 if self.last_image_time is None else stamp - self.last_image_time
         self.last_image_time = stamp
 
-        height = None if self.altitude is None else self.altitude + DOWN_CAMERA_HEIGHT_OFFSET
+        height = None if self.height() is None else self.height() + DOWN_CAMERA_HEIGHT_OFFSET
         flying = height is not None and height > 0.1
         velocity = self.velocity.update(frame, stamp, height) if flying else None
         v_forward, v_left = velocity if velocity is not None else (0.0, 0.0)
@@ -299,9 +332,9 @@ class DroneRoadFollower(Node):
     # ---------------------------------------------------------------- control
 
     def altitude_force(self, dt):
-        if self.altitude is None:
+        if self.height() is None:
             return 0.0
-        error = self.target_altitude - self.altitude
+        error = self.target_altitude - self.height()
         return clamp(self.altitude_pid.update(error, dt), self.max_vertical_force)
 
     def send_score(self, location, prediction):
@@ -357,7 +390,7 @@ class DroneRoadFollower(Node):
 
         elif self.state == 'CLIMB':
             self.publish_hold(dt)
-            if abs(self.target_altitude - self.altitude) < 0.05 and self.elapsed() > 1.0:
+            if abs(self.target_altitude - self.height()) < 0.05 and self.elapsed() > 1.0:
                 self.set_state('FOLLOW')
 
         elif self.state == 'FOLLOW':
@@ -403,7 +436,8 @@ class DroneRoadFollower(Node):
     def show_debug_window(self, frame):
         self.detector.draw_debug(frame)
         frame = cv2.resize(frame, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_NEAREST)
-        alt = f'{self.altitude:.2f}' if self.altitude is not None else '--'
+        height, source = self.height_reading()
+        alt = f'{height:.2f} ({source})' if height is not None else '--'
         lat = self.detector.lateral_error
         head = self.detector.heading_error
         v = self.velocity

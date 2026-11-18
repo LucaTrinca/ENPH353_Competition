@@ -6,7 +6,7 @@
 
          Competition robot design rules
            - collision box 0.30 x 0.30 x 0.08 m (min 0.15 x 0.20 x 0.05, max 0.5 x 0.5 x 0.5)
-           - total mass 1.02 kg (0.5 - 20 kg), every link >= 0.01 kg
+           - total mass 1.03 kg (0.5 - 20 kg), every link >= 0.01 kg
            - wind enabled on the chassis link (flying robot)
            - camera Gaussian noise stddev >= 0.007 -->
 
@@ -126,6 +126,30 @@
         <parent link="chassis" />
         <child link="down_camera_link" />
         <origin xyz="0 0 0.01" rpy="0 ${pi / 2.0} 0" />
+    </joint>
+
+    <!-- Downward range sensor (tiny depth camera) under the chassis, behind the
+         down camera so the camera housing isn't in its view -->
+    <link name="down_range_link">
+        <xacro:box_inertia m="0.01" x="0.02" y="0.02" z="0.01" o_xyz="0 0 0" o_rpy="0 0 0" />
+
+        <!-- Visual sits just above the sensor (link -x is up) - the depth camera
+             sees visuals, so a housing around the sensor would block its view -->
+        <visual>
+            <geometry>
+                <box size="0.01 0.02 0.02" />
+            </geometry>
+            <origin xyz="-0.006 0 0" rpy="0 0 0" />
+            <material name="orange" />
+        </visual>
+    </link>
+
+    <!-- Pitch +90 deg so the sensor's +x axis points straight down. At the
+         chassis origin height, so the range is the drone's height above the ground -->
+    <joint name="chassis_down_range_joint" type="fixed">
+        <parent link="chassis" />
+        <child link="down_range_link" />
+        <origin xyz="-0.06 0 0" rpy="0 ${pi / 2.0} 0" />
     </joint>
 
 </robot>

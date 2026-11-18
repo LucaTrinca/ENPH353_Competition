@@ -53,7 +53,8 @@ ros2 launch controller_pkg drone_teleop.launch.py
 | :--- | :--- | :--- |
 | Down camera, 320x240 at 15 Hz, 134 deg FOV | `/down_camera/image_raw` | Road following, ground velocity (optical flow) |
 | Front camera, 720x480 at 5 Hz | `/camera/image_raw` | Clue boards (only displayed for now) |
-| Altimeter, 30 Hz | `/altimeter` | Altitude hold (height relative to the spawn height) |
+| Down range sensor (8x8 depth camera), 30 Hz | `/down_depth` | Height above the ground (follows terrain) |
+| Altimeter, 30 Hz | `/altimeter` | Fallback height when the range sensor has no reading (relative to the spawn height) |
 | IMU, 100 Hz | `/imu` | Virtual wind sensor (road follower) |
 
 **Wind sensor.** Gazebo has no anemometer, so the road follower estimates the wind from the
@@ -86,5 +87,9 @@ NPCs.
   ever turn wind off, or the drone will never slow down.
 - Gazebo transport uses multicast on your network interface. If Wi-Fi drops, sim topics can
   stop. `export GZ_IP=127.0.0.1` in every terminal keeps the sim on loopback.
+- The down range sensor is a tiny depth camera, not a `gpu_lidar`: with the competition world's
+  `ogre` render engine a gpu_lidar only ever reports its minimum range.
+- Gazebo's `air_speed` sensor doesn't see the wind (it only uses the drone's own velocity), so it
+  can't act as a wind sensor; the wind is estimated from the IMU instead.
 - Don't put `: ` in URDF/xacro comments. The competition launch file parses the robot
   description as YAML and fails to launch.

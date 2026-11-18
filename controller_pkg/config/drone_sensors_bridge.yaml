@@ -29,3 +29,10 @@
   ros_type_name: "std_msgs/msg/Empty"
   gz_type_name: "gz.msgs.Empty"
   direction: ROS_TO_GZ
+
+# Downward range sensor (8x8 depth camera, 32FC1 metres): height above the ground
+- ros_topic_name: "/down_depth"
+  gz_topic_name: "/down_depth"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS

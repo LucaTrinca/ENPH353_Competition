@@ -5,6 +5,7 @@
            - front camera (clues)      /camera/image_raw       720x480, 5 Hz
            - down camera (navigation)  /down_camera/image_raw  320x240, 15 Hz
            - altimeter                 /altimeter              height relative to spawn
+           - down range (depth cam)    /down_depth             height above the ground, 30 Hz
            - IMU                       /imu -->
     <xacro:property name="FOV" value="60" />
     <!-- Wide enough to see ~1.4 m of ground at a 0.3 m hover. Looking straight
@@ -144,6 +145,37 @@
             <update_rate>5</update_rate>
             <visualize>true</visualize>
             <topic>camera/image_raw</topic>
+        </sensor>
+    </gazebo>
+
+    <!-- Downward range sensor - an 8x8 depth camera with a narrow view, pointing
+         straight down. (A gpu_lidar was tried first but returns only its minimum
+         range with the competition world's ogre render engine.) Noise and
+         clipping follow the camera rules - stddev >= 0.007, clipping as provided. -->
+    <gazebo reference="down_range_link">
+        <sensor type="depth_camera" name="down_range">
+            <pose relative_to='down_range_link'>0 0 0 0 0 0</pose>
+            <topic>down_depth</topic>
+            <update_rate>30</update_rate>
+            <always_on>1</always_on>
+            <visualize>false</visualize>
+            <camera>
+                <horizontal_fov>0.2</horizontal_fov>
+                <image>
+                    <width>8</width>
+                    <height>8</height>
+                    <format>R_FLOAT32</format>
+                </image>
+                <clip>
+                    <near>0.1</near>
+                    <far>100</far>
+                </clip>
+                <noise>
+                    <type>gaussian</type>
+                    <mean>0.0</mean>
+                    <stddev>0.007</stddev>
+                </noise>
+            </camera>
         </sensor>
     </gazebo>
 </robot>

@@ -33,6 +33,7 @@ setup(
             'drone_teleop = controller_pkg.drone_teleop:main',
             'drone_time_trial = controller_pkg.drone_time_trial:main',
             'drone_road_follower = controller_pkg.drone_road_follower:main',
+            'drone_position_hold = controller_pkg.drone_position_hold:main',
         ],
     },
 )
