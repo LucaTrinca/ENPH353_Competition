@@ -41,6 +41,19 @@ ros2 launch controller_pkg drone_time_trial.launch.py
 # Start it with the drone on the ground (it zeroes the altimeter there).
 ros2 launch controller_pkg drone_road_follow.launch.py
 
+# Drone wall ride: start timer, take off, ride the south wall (behind the spawn)
+# to the east corner (stepping out on the way to read clue 6, which faces west
+# 0.64 m in from the wall), turn, ride the east wall to the north-east corner,
+# turn, ride the north wall to the tunnel and touch it (+5 bonus), then climb
+# to 2.3 m, cross onto the mountain's plateau and read clue 8, stop timer,
+# hover. Reads clues 1, 5, 6, 7 and 8 (~2.5 min). tunnel_and_clue8:=false
+# stops at the north-east corner instead. Starts two programs: drone_wall_ride (flight only) and
+# clue_finder (cameras: finds, reads and submits the clue boards to the score
+# tracker, saves them to ~/drone_images/clues_<time>/ with clues_read.csv, and
+# opens the left | front | right camera window). They are separate processes so
+# the camera work can't slow the flight control.
+ros2 launch controller_pkg drone_wall_ride.launch.py
+
 # Drone keyboard teleop (keep the teleop window focused)
 #   Space/Ctrl up/down, W/S forward/back, A/D left/right, Q/E rotate, L save camera image,
 #   R reset the drone to its spawn pose
@@ -52,19 +65,73 @@ ros2 launch controller_pkg drone_teleop.launch.py
 | Sensor | Topic | Use |
 | :--- | :--- | :--- |
 | Down camera, 320x240 at 15 Hz, 134 deg FOV | `/down_camera/image_raw` | Road following, ground velocity (optical flow) |
-| Front camera, 720x480 at 5 Hz | `/camera/image_raw` | Clue boards (only displayed for now) |
+| Front camera, 720x480 at 5 Hz, tilted down 0.6 rad | `/camera/image_raw` | Clue boards |
+| Left / right cameras, 1280x960 at 5 Hz, 70 deg FOV, tilted down 0.25 rad | `/left_camera/image_raw`, `/right_camera/image_raw` | Clue boards beside the drone (wall ride) |
+| Right range sensor (32x4 depth strip, 1.2 rad wide), 30 Hz | `/right_depth` | Distance to the wall on the right, and the wall's angle (yaw correction) |
+| Front range sensor (8x4 depth strip), 15 Hz | `/front_depth` | Wall ahead (corners) |
 | Down range sensor (8x8 depth camera), 30 Hz | `/down_depth` | Height above the ground (follows terrain) |
 | Altimeter, 30 Hz | `/altimeter` | Fallback height when the range sensor has no reading (relative to the spawn height) |
-| IMU, 100 Hz | `/imu` | Virtual wind sensor (road follower) |
+| IMU, 100 Hz | `/imu` | Velocity / position dead reckoning, wind (disturbance) estimate |
 
-**Wind sensor.** Gazebo has no anemometer, so the road follower estimates the wind from the
-IMU: wind force = mass x IMU acceleration - commanded force, and wind velocity = wind force /
-1 N per m/s + optical-flow ground velocity. It cancels that wind force in real time
-(feedforward, `wind_feedforward` / `wind_ff_gain`) and publishes the estimate on `/drone/wind`
-(geometry_msgs/Vector3Stamped, m/s, x forward, y left).
+**Mass.** The drone is 20 kg, the maximum allowed. All controller gains and limits are
+accelerations (m/s^2) multiplied by `drone_mass`, and the plugin's limit is `max_accel` (m/s^2) -
+set it to whatever acceleration limit the competition enforces.
+
+**Wind.** The world's wind plugin (gz WindEffects) applies a force *proportional to mass*
+(scaling factor 1: force = mass x (wind velocity - drone velocity) per second), so the heavy
+drone does **not** escape it: the wind (1 m/s, direction swinging +/-137 deg every 10 s, +/-80%
+gusts) pushes with up to ~1.8 m/s^2. The wall ride measures that push with a disturbance
+observer (IMU acceleration minus commanded acceleration, low-passed) and cancels it. The road
+follower's older wind estimator assumed a mass-independent force, which is why it read
+14-220 m/s at 20 kg - its feedforward is off.
 
 The competition launch only bridges `/camera/image_raw`. The drone launch files bridge the
 other sensors with `controller_pkg/config/drone_sensors_bridge.yaml`.
+
+## Clue boards
+
+`controller_pkg/sign_detector.py` finds a complete clue board in an image. It is the team
+notebook's clue finder (blue mask, 4 corners, perspective warp) with these changes: every blue
+region is tried (not only the largest - the lake is blue too), the board must not touch the
+image border, it must be a clean quadrilateral with a solid blue frame on all four sides and a
+light banner inside, slivers of background touching it are removed, a finer mask is tried for
+distant boards (thin frame), and the crop is the banner itself rather than a fixed border. On
+the team's 121 photos it finds 113 boards (the rest are cut off or hidden) with no false
+detections in ~1100 sign-free frames.
+
+`controller_pkg/clue_reader.py` reads a banner: it cuts the two lines into characters on the
+monospaced font's grid (spaces are empty grid slots; merged or broken letters are split or
+joined), crops each like the notebook (ink box + 4 px, 32x32) and classifies it with HOG
+features + an SVM. The clue type is snapped to the closest of the 8 keywords. It reads all 113
+detected boards in the team's photos correctly; from the drone, letters need to be ~8 px or
+taller in the camera image (boards up to ~2 m away with the 1280x960 side cameras).
+
+The SVM (`controller_pkg/models/clue_chars_svm.yml`) is trained on banners drawn exactly as the
+competition does (clue_banner.png, UbuntuMono-R size 90) and degraded like the drone camera
+(lighting, crop errors, 5-40 px letters, noise):
+
+```bash
+cd ~/2026_competition_ws/src/controller_pkg && python3 -m controller_pkg.train_clue_reader --banners 3000
+cd ~/2026_competition_ws && colcon build --packages-select controller_pkg
+```
+
+To use the notebook's CNN instead, export it to ONNX in Colab and pass its path as the wall
+`clue_finder`'s `clue_model` parameter (OpenCV runs it; no TensorFlow needed on the robot):
+
+```python
+!pip install tf2onnx
+import tensorflow as tf, tf2onnx
+model = tf.keras.models.load_model('fizz_detective_cnn.h5')
+spec = (tf.TensorSpec((None, 32, 32, 1), tf.float32, name='input'),)
+tf2onnx.convert.from_keras(model, input_signature=spec, output_path='fizz_detective_cnn.onnx')
+```
+
+`clue_finder` sends each reading to `/score_tracker` as soon as the board has left the view
+(`submit_clues`, on by default) with location = the clue type's number (SIZE 1, VICTIM 2,
+CRIME 3, TIME 4, PLACE 5, MOTIVE 6, WEAPON 7, BANDIT 8 - the row order of the competition's
+clues.csv). Only readings whose clue type is within one letter of a keyword count, and a clue
+is sent again only if a later view changes the answer (the score tracker keeps the latest).
+Boards still in view at the final corner are submitted before the timer is stopped.
 
 ## Resetting the drone
 

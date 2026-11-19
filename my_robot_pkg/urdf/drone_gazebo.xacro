@@ -6,11 +6,15 @@
            - down camera (navigation)  /down_camera/image_raw  320x240, 15 Hz
            - altimeter                 /altimeter              height relative to spawn
            - down range (depth cam)    /down_depth             height above the ground, 30 Hz
-           - IMU                       /imu -->
+           - IMU                       /imu
+           - left / right cameras      /left_camera/image_raw, /right_camera/image_raw  1280x960, 5 Hz
+           - right range (depth cam)   /right_depth            distance to a wall on the right, 30 Hz
+           - front range (depth cam)   /front_depth            distance to a wall ahead, 15 Hz -->
     <xacro:property name="FOV" value="60" />
     <!-- Wide enough to see ~1.4 m of ground at a 0.3 m hover. Looking straight
          down at flat ground a wide FOV only changes the scale, not the shape -->
     <xacro:property name="DOWN_FOV" value="134" />
+    <xacro:property name="SIDE_FOV" value="70" />
 
     <!-- Force controller - /cmd_vel (bridged to /model/my_robot/cmd_vel) is read as
          linear.x/y/z = forward/left/up force [N], angular.z = yaw rate [rad/s] -->
@@ -20,7 +24,9 @@
             name="drone_plugins::DroneForceController">
             <link_name>chassis</link_name>
             <cmd_timeout>0.5</cmd_timeout>
-            <max_force>20</max_force>
+            <!-- Acceleration limit [m/s^2], force limit = mass x max_accel.
+                 Set this to the limit the competition enforces. -->
+            <max_accel>20</max_accel>
             <!-- 0 with wind on - the wind plugin already applies air drag
                  (1 N per m/s relative to the air). Use 1.0 if wind is off. -->
             <linear_drag>0.0</linear_drag>
@@ -178,4 +184,75 @@
             </camera>
         </sensor>
     </gazebo>
+
+    <!-- Side cameras - same rules as the front camera (noise stddev >= 0.007,
+         clipping as provided). Image left = toward the drone's front for the
+         right camera, toward its back for the left camera. -->
+    <xacro:macro name="side_camera_sensor" params="side">
+        <gazebo reference="${side}_camera_link">
+            <sensor type="camera" name="${side}_camera">
+                <pose relative_to='${side}_camera_link'>0 0 0 0 0 0</pose>
+                <camera>
+                    <horizontal_fov>${SIDE_FOV * pi / 180}</horizontal_fov>
+                    <!-- 1280 x 960 so a clue board ~2 m away (clue 7 seen from the
+                         east wall) still has letters ~8 px tall -->
+                    <image>
+                        <width>1280</width>
+                        <height>960</height>
+                    </image>
+                    <clip>
+                        <near>0.1</near>
+                        <far>100</far>
+                    </clip>
+                    <noise>
+                        <type>gaussian</type>
+                        <mean>0.0</mean>
+                        <stddev>0.007</stddev>
+                    </noise>
+                </camera>
+                <always_on>1</always_on>
+                <update_rate>5</update_rate>
+                <visualize>true</visualize>
+                <topic>${side}_camera/image_raw</topic>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+    <xacro:side_camera_sensor side="left" />
+    <xacro:side_camera_sensor side="right" />
+
+    <!-- Horizontal range sensors - thin strips of depth pixels. Each column is
+         the depth (along the sensor axis) at a different bearing, so the right
+         strip also gives the wall's angle relative to the drone. -->
+    <xacro:macro name="range_sensor_gazebo" params="name width height fov rate">
+        <gazebo reference="${name}_range_link">
+            <sensor type="depth_camera" name="${name}_range">
+                <pose relative_to='${name}_range_link'>0 0 0 0 0 0</pose>
+                <topic>${name}_depth</topic>
+                <update_rate>${rate}</update_rate>
+                <always_on>1</always_on>
+                <visualize>false</visualize>
+                <camera>
+                    <horizontal_fov>${fov}</horizontal_fov>
+                    <image>
+                        <width>${width}</width>
+                        <height>${height}</height>
+                        <format>R_FLOAT32</format>
+                    </image>
+                    <clip>
+                        <near>0.1</near>
+                        <far>100</far>
+                    </clip>
+                    <noise>
+                        <type>gaussian</type>
+                        <mean>0.0</mean>
+                        <stddev>0.007</stddev>
+                    </noise>
+                </camera>
+            </sensor>
+        </gazebo>
+    </xacro:macro>
+
+    <xacro:range_sensor_gazebo name="right" width="32" height="4" fov="1.2" rate="30" />
+    <xacro:range_sensor_gazebo name="front" width="8" height="4" fov="0.3" rate="15" />
 </robot>

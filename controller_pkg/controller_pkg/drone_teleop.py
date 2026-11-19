@@ -12,11 +12,13 @@ Press:
     L           save the current camera image (PNG) to <save_dir>
     R           reset the drone to its spawn pose (on /drone/reset)
 
-Publishes force commands on /cmd_vel (geometry_msgs/Twist, forces in N):
+Each key commands an acceleration, sent as a force (mass x acceleration) on
+/cmd_vel (geometry_msgs/Twist, forces in N):
     linear.x = forward, linear.y = left, linear.z = up
     angular.z = yaw rate [rad/s]
 The drone plugin compensates gravity once the drone has taken off, so with no
-keys pressed the drone hovers (and drifts with the wind).
+keys pressed the drone holds its height. A heavy drone has almost no air drag
+to slow it, so it keeps gliding after you let go: brake with the opposite key.
 """
 import os
 import tkinter as tk
@@ -37,10 +39,12 @@ class DroneTeleop(Node):
     def __init__(self):
         super().__init__('drone_teleop')
 
-        self.declare_parameter('horizontal_force', 1.0)  # N
-        self.declare_parameter('vertical_force', 1.5)    # N
-        self.horizontal_force = float(self.get_parameter('horizontal_force').value)
-        self.vertical_force = float(self.get_parameter('vertical_force').value)
+        self.declare_parameter('horizontal_accel', 1.0)  # m/s^2
+        self.declare_parameter('vertical_accel', 1.5)    # m/s^2
+        self.declare_parameter('drone_mass', 20.0)       # kg, must match the URDF
+        mass = float(self.get_parameter('drone_mass').value)
+        self.horizontal_force = mass * float(self.get_parameter('horizontal_accel').value)
+        self.vertical_force = mass * float(self.get_parameter('vertical_accel').value)
         self.declare_parameter('yaw_rate', 1.0)          # rad/s
         self.yaw_rate = float(self.get_parameter('yaw_rate').value)
         self.declare_parameter('save_dir', '~/drone_images')

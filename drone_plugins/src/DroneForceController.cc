@@ -25,7 +25,7 @@
  *   <topic>/model/<model_name>/cmd_vel</topic>
  *   <reset_topic>/model/<model_name>/reset</reset_topic>
  *   <cmd_timeout>0.5</cmd_timeout>
- *   <max_force>20</max_force>
+ *   <max_accel>20</max_accel>         per-axis command limit [m/s^2], force limit = mass x max_accel
  *   <linear_drag>1.0</linear_drag>    N per m/s
  *   <attitude_wn>10</attitude_wn>     natural frequency of roll/pitch hold
  *   <yaw_rate_gain>10</yaw_rate_gain>
@@ -76,7 +76,7 @@ public:
 
     const std::string linkName = _sdf->Get<std::string>("link_name", "chassis").first;
     this->cmdTimeout = _sdf->Get<double>("cmd_timeout", 0.5).first;
-    this->maxForce = _sdf->Get<double>("max_force", 20.0).first;
+    const double maxAccel = _sdf->Get<double>("max_accel", 20.0).first;
     const double wn = _sdf->Get<double>("attitude_wn", 10.0).first;
     this->attKp = wn * wn;
     this->attKd = 2.0 * wn;  // critically damped
@@ -101,6 +101,7 @@ public:
     const auto *inertial = _ecm.Component<gz::sim::components::Inertial>(this->link.Entity());
     this->mass = inertial->Data().MassMatrix().Mass();
     this->moi = inertial->Data().MassMatrix().DiagonalMoments();
+    this->maxForce = this->mass * maxAccel;
 
     const auto *gravity = _ecm.Component<gz::sim::components::Gravity>(gz::sim::worldEntity(_ecm));
     this->gravity = gravity ? gravity->Data() : gz::math::Vector3d(0, 0, -9.8);
@@ -110,7 +111,8 @@ public:
     this->valid = true;
 
     gzmsg << "DroneForceController: link [" << linkName << "], mass " << this->mass
-          << " kg, listening on [" << topic << "], reset on [" << resetTopic << "]" << std::endl;
+          << " kg, force limit " << this->maxForce << " N per axis, listening on ["
+          << topic << "], reset on [" << resetTopic << "]" << std::endl;
   }
 
   void PreUpdate(const gz::sim::UpdateInfo &_info,

@@ -21,13 +21,17 @@ def generate_launch_description():
             package='controller_pkg',
             executable='drone_position_hold',
             output='screen',
+            # Gains are accelerations (m/s^2), scaled by drone_mass into forces
             parameters=[{
                 'hold_altitude': 0.3,
                 'kp': 12.0,
                 'ki': 3.0,
-                'kd': 5.0,
-                'wind_feedforward': True,
+                'kd': 6.0,
+                # Off for the 20 kg drone - the wind (~1 N) is lost in the noise of the
+                # IMU wind estimate, and it barely moves 20 kg anyway. Useful when light.
+                'wind_feedforward': False,
                 'wind_ff_gain': 1.0,
+                'drone_mass': 20.0,
             }],
         ),
     ])

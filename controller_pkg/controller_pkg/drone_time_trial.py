@@ -5,10 +5,11 @@ Starts the score tracker timer, takes off, flies forward, hovers, then stops
 the timer. The drone never lands again: once flying, every ground contact is
 a -5 pt penalty.
 
-Open loop: a fixed sequence of force commands on /cmd_vel
-(linear.x/y/z = forward/left/up force in N). The drone plugin compensates
-gravity and applies drag (1 N per m/s), so each "go" phase is followed by an
-equal and opposite "brake" phase to stop the drone.
+Open loop: a fixed sequence of accelerations, sent as forces (mass x
+acceleration) on /cmd_vel (linear.x/y/z = forward/left/up force in N). The
+drone plugin compensates gravity. Air drag barely slows a 20 kg drone, so each
+"go" phase is followed by an equal and opposite "brake" phase of the same
+length: distance = acceleration x time^2.
 
 Topics used: /clock (sub), /cmd_vel, /score_tracker (pub).
 """
@@ -22,15 +23,15 @@ from std_msgs.msg import String
 
 class DroneTimeTrial(Node):
 
-    # (state name, duration [sim s], force (forward, left, up) [N])
-    # With 1 kg and 1 N/(m/s) drag: CLIMB + BRAKE_CLIMB rises ~1.3 m,
-    # FORWARD + BRAKE_FORWARD travels ~1.8 m.
+    # (state name, duration [sim s], acceleration (forward, left, up) [m/s^2])
+    # CLIMB + BRAKE_CLIMB rises 1 x 1.1^2 = ~1.2 m,
+    # FORWARD + BRAKE_FORWARD travels 1 x 1.3^2 = ~1.7 m.
     FLIGHT_PLAN = [
-        ('CLIMB', 1.2, (0.0, 0.0, 2.0)),
-        ('BRAKE_CLIMB', 0.5, (0.0, 0.0, -2.0)),
+        ('CLIMB', 1.1, (0.0, 0.0, 1.0)),
+        ('BRAKE_CLIMB', 1.1, (0.0, 0.0, -1.0)),
         ('STEADY', 1.0, (0.0, 0.0, 0.0)),
-        ('FORWARD', 1.5, (2.0, 0.0, 0.0)),
-        ('BRAKE_FORWARD', 0.55, (-2.0, 0.0, 0.0)),
+        ('FORWARD', 1.3, (1.0, 0.0, 0.0)),
+        ('BRAKE_FORWARD', 1.3, (-1.0, 0.0, 0.0)),
         ('HOVER', 2.0, (0.0, 0.0, 0.0)),
     ]
 
@@ -40,9 +41,11 @@ class DroneTimeTrial(Node):
         # Team ID and password: max 8 characters each, no spaces or commas
         self.declare_parameter('team_id', 'TeamFizz')
         self.declare_parameter('team_password', 'pass1234')
+        self.declare_parameter('drone_mass', 20.0)  # kg, must match the URDF
 
         self.team_id = self.get_parameter('team_id').value
         self.team_password = self.get_parameter('team_password').value
+        self.mass = float(self.get_parameter('drone_mass').value)
 
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 1)
         self.score_pub = self.create_publisher(String, '/score_tracker', 1)
@@ -98,8 +101,8 @@ class DroneTimeTrial(Node):
                 self.start_segment(0)
 
         elif 0 <= self.plan_index < len(self.FLIGHT_PLAN):
-            _, duration, force = self.FLIGHT_PLAN[self.plan_index]
-            self.publish_force(*force)
+            _, duration, accel = self.FLIGHT_PLAN[self.plan_index]
+            self.publish_force(*(self.mass * a for a in accel))
 
             if self.elapsed() >= duration:
                 if self.plan_index + 1 < len(self.FLIGHT_PLAN):

@@ -10,6 +10,7 @@ forward the ground moves down the image (+y); when it moves left the ground
 moves right in the image (+x).
 """
 import math
+from collections import deque
 
 import cv2
 import numpy as np
@@ -19,16 +20,31 @@ class GroundVelocityEstimator:
 
     # Phase correlation response below this is treated as unreliable
     MIN_RESPONSE = 0.05
-    DOWNSCALE = 0.5
     # Gazebo sometimes re-publishes the previous render with a new timestamp.
     # A genuinely new frame differs by at least the camera noise (mean abs
     # difference ~2 grey levels), so anything below this is a repeat.
     MIN_FRAME_DIFFERENCE = 0.5
 
-    def __init__(self, horizontal_fov_rad, image_width_px, smoothing=0.5):
+    def __init__(self, horizontal_fov_rad, image_width_px, smoothing=0.5,
+                 crop_fraction=1.0, min_texture=0.0, downscale=0.5, baseline=0.0):
+        """crop_fraction: use only this central fraction of the image (e.g. 0.5),
+        so walls or cliffs near the edges of the wide view don't pull the
+        estimate; the ground straight below is at the measured height.
+        min_texture: frames whose (cropped) grey-level standard deviation is
+        below this have nothing to track (e.g. open water) and are skipped.
+        downscale: image scale used for the correlation (1.0 = full resolution).
+        baseline: compare with the frame from about this many seconds ago
+        instead of the previous one. High up, the ground moves well under a
+        pixel between frames and the shift is lost in the noise; over a longer
+        baseline it becomes several pixels (0 = previous frame)."""
         self.tan_half_fov = math.tan(horizontal_fov_rad / 2.0)
         self.image_width_px = image_width_px
         self.smoothing = smoothing
+        self.crop_fraction = crop_fraction
+        self.min_texture = min_texture
+        self.downscale = downscale
+        self.baseline = baseline
+        self.history = deque(maxlen=20)   # (stamp, grey) for the long baseline
         self.prev = None
         self.prev_time = None
         self.window = None
@@ -37,6 +53,7 @@ class GroundVelocityEstimator:
         self.valid = False
 
     def reset(self):
+        self.history.clear()
         self.prev = None
         self.prev_time = None
         self.forward = self.left = 0.0
@@ -47,8 +64,20 @@ class GroundVelocityEstimator:
         the ground [m]. Returns (forward, left) velocity in m/s, or None if
         no reliable estimate is available yet."""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, None, fx=self.DOWNSCALE, fy=self.DOWNSCALE,
-                          interpolation=cv2.INTER_AREA).astype(np.float32)
+        if self.crop_fraction < 1.0:
+            h, w = gray.shape
+            ch, cw = int(h * self.crop_fraction), int(w * self.crop_fraction)
+            gray = gray[(h - ch) // 2:(h + ch) // 2, (w - cw) // 2:(w + cw) // 2]
+        if self.downscale != 1.0:
+            gray = cv2.resize(gray, None, fx=self.downscale, fy=self.downscale,
+                              interpolation=cv2.INTER_AREA)
+        gray = gray.astype(np.float32)
+        if gray.std() < self.min_texture:
+            # Nothing to track: drop the reference so the next textured frame starts fresh
+            self.prev = None
+            self.history.clear()
+            self.valid = False
+            return None
         if self.window is None or self.window.shape != gray.shape:
             self.window = cv2.createHanningWindow(gray.shape[::-1], cv2.CV_32F)
 
@@ -57,6 +86,15 @@ class GroundVelocityEstimator:
             # Repeated frame: keep the previous one and its time, report the last estimate
             return (self.forward, self.left) if self.valid else None
         self.prev, self.prev_time = gray, stamp
+        if self.baseline > 0.0 and stamp is not None:
+            # Long baseline: the stored frame closest to `baseline` s ago (at
+            # least half that old)
+            self.history.append((stamp, gray))
+            old = [(t, g) for t, g in self.history if stamp - t >= 0.5 * self.baseline]
+            if not old:
+                self.valid = False
+                return None
+            prev_time, prev = min(old, key=lambda h: abs((stamp - h[0]) - self.baseline))
         if prev is None or stamp is None or prev_time is None or height is None:
             self.valid = False
             return None
@@ -72,7 +110,7 @@ class GroundVelocityEstimator:
 
         # Metres per (full-resolution) pixel on the ground
         metres_per_px = 2.0 * height * self.tan_half_fov / self.image_width_px
-        scale = metres_per_px / self.DOWNSCALE / dt
+        scale = metres_per_px / self.downscale / dt
         forward = dy * scale
         left = dx * scale
 

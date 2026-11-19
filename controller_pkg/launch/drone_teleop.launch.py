@@ -22,8 +22,9 @@ def generate_launch_description():
             executable='drone_teleop',
             output='screen',
             parameters=[{
-                'horizontal_force': 1.0,
-                'vertical_force': 1.5,
+                'horizontal_accel': 1.0,
+                'vertical_accel': 1.5,
+                'drone_mass': 20.0,
                 'yaw_rate': 1.0,
                 'save_dir': '~/drone_images',
             }],

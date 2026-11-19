@@ -15,8 +15,10 @@ as ground level, so the altimeter fallback is also a height above the ground.
 
 Wind pushes the drone around, so the horizontal control uses the drone's
 velocity over the ground, measured with optical flow on the down camera
-(GroundVelocityEstimator). All outputs go on /cmd_vel (forces in N, yaw rate
-in rad/s):
+(GroundVelocityEstimator). The controllers work in accelerations (m/s^2), so
+the same gains suit any drone mass; publish_cmd turns them into forces
+(mass x acceleration) on /cmd_vel, adds the wind feedforward (a force, since
+the wind's push doesn't depend on mass) and sends the yaw rate in rad/s:
   - altitude:  PID on the altimeter height                     -> linear.z
   - lateral:   PID on the road offset under the drone [m], with
                damping from the measured sideways velocity     -> linear.y
@@ -76,28 +78,29 @@ class DroneRoadFollower(Node):
         self.declare_parameter('follow_duration', 60.0)     # sim s of road following
         self.declare_parameter('cruise_speed', 0.4)         # m/s over the ground
         self.declare_parameter('down_camera_fov_deg', 134.0)  # must match drone_gazebo.xacro
-        self.declare_parameter('altitude_kp', 3.0)
+        # Gains and limits are accelerations (m/s^2 per unit of error), per kg of drone
+        self.declare_parameter('altitude_kp', 3.0)          # m/s^2 per m of height error
         self.declare_parameter('altitude_ki', 0.5)
-        self.declare_parameter('altitude_kd', 2.0)
-        self.declare_parameter('lateral_kp', 10.0)          # N per m of road offset
-        self.declare_parameter('lateral_ki', 4.0)           # N per m*s
-        self.declare_parameter('lateral_kd', 4.0)           # N per m/s of sideways velocity
-        self.declare_parameter('speed_kp', 4.0)             # N per m/s of speed error
-        self.declare_parameter('speed_ki', 3.0)             # N per m
+        self.declare_parameter('altitude_kd', 3.0)          # m/s^2 per m/s
+        self.declare_parameter('lateral_kp', 10.0)          # m/s^2 per m of road offset
+        self.declare_parameter('lateral_ki', 4.0)           # m/s^2 per m*s
+        self.declare_parameter('lateral_kd', 5.0)           # m/s^2 per m/s of sideways velocity
+        self.declare_parameter('speed_kp', 5.0)             # m/s^2 per m/s of speed error
+        self.declare_parameter('speed_ki', 3.0)             # m/s^2 per m
         self.declare_parameter('yaw_kp', 1.5)               # rad/s per rad of heading error
-        self.declare_parameter('max_vertical_force', 3.0)
-        self.declare_parameter('max_horizontal_force', 4.0)
+        self.declare_parameter('max_vertical_accel', 3.0)   # m/s^2
+        self.declare_parameter('max_horizontal_accel', 4.0)  # m/s^2, PID part
         self.declare_parameter('max_yaw_rate', 1.0)
         self.declare_parameter('show_debug', True)          # down camera debug window
         self.declare_parameter('show_front_camera', True)   # front camera window
-        self.declare_parameter('wind_feedforward', True)    # cancel the measured wind
+        self.declare_parameter('wind_feedforward', False)   # cancel the measured wind (light drones)
         self.declare_parameter('wind_ff_gain', 1.0)         # fraction of the wind force cancelled
         self.declare_parameter('wind_filter_tau', 0.3)      # s, wind sensor low-pass filter
-        self.declare_parameter('drone_mass', 1.03)          # kg, must match the URDF
+        self.declare_parameter('drone_mass', 20.0)          # kg, must match the URDF
         self.declare_parameter('use_range_sensor', True)    # height from the downward depth sensor
         self.declare_parameter('range_timeout', 0.3)        # s, older readings fall back to the altimeter
         self.declare_parameter('air_drag_coeff', 1.0)       # N per m/s, wind plugin scaling factor
-        self.declare_parameter('max_total_horizontal_force', 8.0)  # N, PID + feedforward
+        self.declare_parameter('max_total_horizontal_accel', 8.0)  # m/s^2, PID + feedforward
 
         p = lambda name: self.get_parameter(name).value  # noqa: E731
         self.team_id = p('team_id')
@@ -113,8 +116,9 @@ class DroneRoadFollower(Node):
         self.speed_kp = float(p('speed_kp'))
         self.speed_ki = float(p('speed_ki'))
         self.yaw_kp = float(p('yaw_kp'))
-        self.max_vertical_force = float(p('max_vertical_force'))
-        self.max_horizontal_force = float(p('max_horizontal_force'))
+        self.max_vertical_accel = float(p('max_vertical_accel'))
+        self.max_horizontal_accel = float(p('max_horizontal_accel'))
+        self.mass = float(p('drone_mass'))
         self.max_yaw_rate = float(p('max_yaw_rate'))
         self.show_debug = bool(p('show_debug'))
         self.show_front_camera = bool(p('show_front_camera'))
@@ -122,7 +126,7 @@ class DroneRoadFollower(Node):
         self.use_range_sensor = bool(p('use_range_sensor'))
         self.range_timeout = float(p('range_timeout'))
         self.wind_ff_gain = float(p('wind_ff_gain'))
-        self.max_total_horizontal_force = float(p('max_total_horizontal_force'))
+        self.max_total_horizontal_accel = float(p('max_total_horizontal_accel'))
 
         self.altitude_pid = PID(float(p('altitude_kp')), float(p('altitude_ki')),
                                 float(p('altitude_kd')), integral_limit=2.0)
@@ -165,8 +169,9 @@ class DroneRoadFollower(Node):
         # Horizontal control state, updated on every down camera frame
         self.road_visible = False
         self.last_image_time = None
-        self.lateral_integral = 0.0   # N, sideways wind compensation
-        self.forward_integral = 0.0   # N, forward wind compensation
+        # Horizontal commands and integrals are accelerations [m/s^2]
+        self.lateral_integral = 0.0   # sideways wind compensation
+        self.forward_integral = 0.0   # forward wind compensation
         self.follow_cmd = (0.0, 0.0, 0.0)  # (forward, left, yaw) while following the road
         self.hold_cmd = (0.0, 0.0)         # (forward, left) to hold position
         self.return_cmd = None             # (forward, left) back to the last road seen
@@ -263,8 +268,8 @@ class DroneRoadFollower(Node):
         # Hold position: zero ground velocity, keeping the wind compensation
         hold_forward = self.speed_kp * (0.0 - v_forward) + self.forward_integral
         hold_left = self.lateral_kd * (0.0 - v_left) - self.lateral_integral
-        self.hold_cmd = (clamp(hold_forward, self.max_horizontal_force),
-                         clamp(hold_left, self.max_horizontal_force))
+        self.hold_cmd = (clamp(hold_forward, self.max_horizontal_accel),
+                         clamp(hold_left, self.max_horizontal_accel))
 
         # The road the drone came from is opposite its direction of travel
         # (straight behind when it is barely moving)
@@ -278,7 +283,7 @@ class DroneRoadFollower(Node):
         if not self.road_visible:
             if integrate:
                 self.forward_integral += self.speed_ki * (0.0 - v_forward) * dt
-                self.forward_integral = clamp(self.forward_integral, self.max_horizontal_force)
+                self.forward_integral = clamp(self.forward_integral, self.max_horizontal_accel)
             if self.detector.nearest_road is not None and height:
                 # Road visible but not under the drone: aim for the nearest road pixel
                 metres_per_px = 2.0 * height * math.tan(self.down_fov / 2.0) / frame.shape[1]
@@ -294,7 +299,7 @@ class DroneRoadFollower(Node):
         self.return_cmd = None
         if integrate:
             self.lateral_integral += self.lateral_ki * offset * dt
-            self.lateral_integral = clamp(self.lateral_integral, self.max_horizontal_force)
+            self.lateral_integral = clamp(self.lateral_integral, self.max_horizontal_accel)
         force_right = self.lateral_kp * offset + self.lateral_integral - self.lateral_kd * v_right
 
         # Forward: slow down in turns and when far off the road centre
@@ -303,13 +308,13 @@ class DroneRoadFollower(Node):
         speed_error = target_speed - v_forward
         if integrate:
             self.forward_integral += self.speed_ki * speed_error * dt
-            self.forward_integral = clamp(self.forward_integral, self.max_horizontal_force)
+            self.forward_integral = clamp(self.forward_integral, self.max_horizontal_accel)
         force_forward = self.speed_kp * speed_error + self.forward_integral
 
         # Road turning right (positive heading) -> turn clockwise (negative yaw rate)
         yaw = -clamp(self.yaw_kp * heading, self.max_yaw_rate)
-        self.follow_cmd = (clamp(force_forward, self.max_horizontal_force),
-                           -clamp(force_right, self.max_horizontal_force),
+        self.follow_cmd = (clamp(force_forward, self.max_horizontal_accel),
+                           -clamp(force_right, self.max_horizontal_accel),
                            yaw)
 
     def update_return_command(self, v_forward, v_right, dt):
@@ -326,8 +331,8 @@ class DroneRoadFollower(Node):
         force_forward = (self.lateral_kp * forward - self.lateral_kd * v_forward
                          + self.forward_integral)
         force_right = self.lateral_kp * right - self.lateral_kd * v_right + self.lateral_integral
-        self.return_cmd = (clamp(force_forward, self.max_horizontal_force),
-                           -clamp(force_right, self.max_horizontal_force))
+        self.return_cmd = (clamp(force_forward, self.max_horizontal_accel),
+                           -clamp(force_right, self.max_horizontal_accel))
 
     # ---------------------------------------------------------------- control
 
@@ -335,7 +340,7 @@ class DroneRoadFollower(Node):
         if self.height() is None:
             return 0.0
         error = self.target_altitude - self.height()
-        return clamp(self.altitude_pid.update(error, dt), self.max_vertical_force)
+        return clamp(self.altitude_pid.update(error, dt), self.max_vertical_accel)
 
     def send_score(self, location, prediction):
         msg = String()
@@ -352,14 +357,17 @@ class DroneRoadFollower(Node):
         return self.sim_time - self.state_start_time
 
     def publish_cmd(self, forward=0.0, left=0.0, up=0.0, yaw=0.0):
-        # Wind feedforward on top of the PID forces
+        """forward/left/up are accelerations [m/s^2]; they're sent as forces [N]."""
+        # Wind feedforward (a force) on top of the PID forces
         if self.wind_feedforward and self.flying():
             ff_forward, ff_left = self.wind.feedforward(self.ground_velocity)
             self.wind_ff = (self.wind_ff_gain * ff_forward, self.wind_ff_gain * ff_left)
         else:
             self.wind_ff = (0.0, 0.0)
-        forward = clamp(forward + self.wind_ff[0], self.max_total_horizontal_force)
-        left = clamp(left + self.wind_ff[1], self.max_total_horizontal_force)
+        max_total = self.mass * self.max_total_horizontal_accel
+        forward = clamp(self.mass * forward + self.wind_ff[0], max_total)
+        left = clamp(self.mass * left + self.wind_ff[1], max_total)
+        up = self.mass * up
         self.last_cmd = (forward, left, up)
 
         twist = Twist()
@@ -453,7 +461,7 @@ class DroneRoadFollower(Node):
                  f'Heading: {math.degrees(head):+.0f} deg' if head is not None else 'Heading: --',
                  vel,
                  self.wind_text(),
-                 f'F fwd {forward:+.2f}  left {left:+.2f}  yaw {yaw:+.2f}']
+                 f'a fwd {forward:+.2f}  left {left:+.2f} m/s^2  yaw {yaw:+.2f}']
         for i, text in enumerate(lines):
             cv2.putText(frame, text, (8, 22 + 22 * i), cv2.FONT_HERSHEY_SIMPLEX,
                         0.55, (0, 255, 0), 2)

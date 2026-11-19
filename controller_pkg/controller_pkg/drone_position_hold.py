@@ -11,7 +11,8 @@ found in the current frame by template matching, which pulls the offset back
 to the true offset from the hold point so it doesn't drift. Over a straight
 road the match only pins down the position across the road, so each axis
 uses the snapshot only when the match is sharp along that axis.
-Control per horizontal axis: PID on the offset, damping from the measured
+Control per horizontal axis, as an acceleration (scaled by the drone's mass
+into a force when published): PID on the offset, damping from the measured
 velocity, plus the wind feedforward from the virtual wind sensor.
 
 Start it with the drone on the ground (the altimeter is zeroed there).
@@ -66,19 +67,20 @@ class DronePositionHold(Node):
         self.declare_parameter('hold_altitude', 0.3)        # m above the ground
         self.declare_parameter('settle_time', 2.0)          # s at altitude before the snapshot
         self.declare_parameter('down_camera_fov_deg', 134.0)
-        self.declare_parameter('kp', 8.0)                   # N per m of offset
-        self.declare_parameter('ki', 2.0)                   # N per m*s
-        self.declare_parameter('kd', 4.0)                   # N per m/s of velocity
+        # Gains and limits are accelerations (m/s^2 per unit of error), per kg of drone
+        self.declare_parameter('kp', 12.0)                  # m/s^2 per m of offset
+        self.declare_parameter('ki', 3.0)                   # m/s^2 per m*s
+        self.declare_parameter('kd', 6.0)                   # m/s^2 per m/s of velocity
         self.declare_parameter('altitude_kp', 3.0)
         self.declare_parameter('altitude_ki', 0.5)
-        self.declare_parameter('altitude_kd', 2.0)
-        self.declare_parameter('max_horizontal_force', 4.0)
-        self.declare_parameter('max_total_horizontal_force', 8.0)
-        self.declare_parameter('max_vertical_force', 3.0)
-        self.declare_parameter('wind_feedforward', True)
+        self.declare_parameter('altitude_kd', 3.0)
+        self.declare_parameter('max_horizontal_accel', 4.0)
+        self.declare_parameter('max_total_horizontal_accel', 8.0)
+        self.declare_parameter('max_vertical_accel', 3.0)
+        self.declare_parameter('wind_feedforward', False)  # useful for light drones only
         self.declare_parameter('wind_ff_gain', 1.0)
         self.declare_parameter('wind_filter_tau', 0.3)
-        self.declare_parameter('drone_mass', 1.03)
+        self.declare_parameter('drone_mass', 20.0)          # kg, must match the URDF
         self.declare_parameter('air_drag_coeff', 1.0)
 
         p = lambda name: self.get_parameter(name).value  # noqa: E731
@@ -88,9 +90,10 @@ class DronePositionHold(Node):
         self.kp = float(p('kp'))
         self.ki = float(p('ki'))
         self.kd = float(p('kd'))
-        self.max_horizontal_force = float(p('max_horizontal_force'))
-        self.max_total_horizontal_force = float(p('max_total_horizontal_force'))
-        self.max_vertical_force = float(p('max_vertical_force'))
+        self.max_horizontal_accel = float(p('max_horizontal_accel'))
+        self.max_total_horizontal_accel = float(p('max_total_horizontal_accel'))
+        self.max_vertical_accel = float(p('max_vertical_accel'))
+        self.mass = float(p('drone_mass'))
         self.wind_feedforward = bool(p('wind_feedforward'))
         self.wind_ff_gain = float(p('wind_ff_gain'))
 
@@ -121,9 +124,9 @@ class DronePositionHold(Node):
         self.offset = (0.0, 0.0)         # (forward, left) m from the hold point
         self.offset_source = '--'
         self.ground_velocity = (0.0, 0.0)
-        self.integral = [0.0, 0.0]       # N, (forward, left)
+        self.integral = [0.0, 0.0]       # m/s^2, (forward, left)
         self.last_image_time = None
-        self.horizontal_cmd = (0.0, 0.0)  # (forward, left) N, PID part
+        self.horizontal_cmd = (0.0, 0.0)  # (forward, left) m/s^2, PID part
         self.last_cmd = (0.0, 0.0, 0.0)   # (forward, left, up) N sent on /cmd_vel
 
         self.create_timer(0.05, self.control_loop)  # 20 Hz
@@ -241,9 +244,9 @@ class DronePositionHold(Node):
             error = -self.offset[i] if self.state == 'HOLD' else 0.0
             if self.state == 'HOLD':
                 self.integral[i] = clamp(self.integral[i] + self.ki * error * dt,
-                                         self.max_horizontal_force)
+                                         self.max_horizontal_accel)
             force = self.kp * error + self.integral[i] - self.kd * self.ground_velocity[i]
-            forces.append(clamp(force, self.max_horizontal_force))
+            forces.append(clamp(force, self.max_horizontal_accel))
         self.horizontal_cmd = tuple(forces)
 
     # ---------------------------------------------------------------- control
@@ -257,12 +260,16 @@ class DronePositionHold(Node):
         return self.sim_time - self.state_start_time
 
     def publish_cmd(self, forward, left, up):
+        """forward/left/up are accelerations [m/s^2]; they're sent as forces [N].
+        The wind feedforward is already a force (the wind doesn't care about mass)."""
+        forward, left, up = self.mass * forward, self.mass * left, self.mass * up
         if self.wind_feedforward and self.flying():
             ff_forward, ff_left = self.wind.feedforward(self.ground_velocity)
             forward += self.wind_ff_gain * ff_forward
             left += self.wind_ff_gain * ff_left
-        forward = clamp(forward, self.max_total_horizontal_force)
-        left = clamp(left, self.max_total_horizontal_force)
+        max_total = self.mass * self.max_total_horizontal_accel
+        forward = clamp(forward, max_total)
+        left = clamp(left, max_total)
         self.last_cmd = (forward, left, up)
         twist = Twist()
         twist.linear.x = forward
@@ -284,7 +291,7 @@ class DronePositionHold(Node):
                 self.set_state('CLIMB')
         elif self.state in ('CLIMB', 'HOLD'):
             up = clamp(self.altitude_pid.update(self.hold_altitude - self.altitude, dt),
-                       self.max_vertical_force)
+                       self.max_vertical_accel)
             self.publish_cmd(self.horizontal_cmd[0], self.horizontal_cmd[1], up)
             if (self.state == 'CLIMB' and self.elapsed() > self.settle_time
                     and abs(self.hold_altitude - self.altitude) < 0.03):

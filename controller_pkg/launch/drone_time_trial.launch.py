@@ -11,6 +11,7 @@ def generate_launch_description():
             parameters=[{
                 'team_id': 'TeamFizz',
                 'team_password': 'pass1234',
+                'drone_mass': 20.0,
             }],
         ),
     ])

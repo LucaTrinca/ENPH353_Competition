@@ -15,6 +15,8 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        # Trained clue character classifier (train_clue_reader.py)
+        (os.path.join('share', package_name, 'models'), glob('controller_pkg/models/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -34,6 +36,10 @@ setup(
             'drone_time_trial = controller_pkg.drone_time_trial:main',
             'drone_road_follower = controller_pkg.drone_road_follower:main',
             'drone_position_hold = controller_pkg.drone_position_hold:main',
+            'drone_sign_tour = controller_pkg.drone_sign_tour:main',
+            'drone_wall_ride = controller_pkg.drone_wall_ride:main',
+            'clue_finder = controller_pkg.clue_finder:main',
+            'train_clue_reader = controller_pkg.train_clue_reader:main',
         ],
     },
 )

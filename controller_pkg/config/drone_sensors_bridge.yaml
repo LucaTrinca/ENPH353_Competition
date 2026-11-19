@@ -36,3 +36,29 @@
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "gz.msgs.Image"
   direction: GZ_TO_ROS
+
+# Side cameras (clues beside the drone)
+- ros_topic_name: "/left_camera/image_raw"
+  gz_topic_name: "/left_camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/right_camera/image_raw"
+  gz_topic_name: "/right_camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+# Horizontal range sensors (depth strips, 32FC1 metres) for wall riding
+- ros_topic_name: "/right_depth"
+  gz_topic_name: "/right_depth"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/front_depth"
+  gz_topic_name: "/front_depth"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
