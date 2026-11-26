@@ -36,6 +36,7 @@ LOWER_BLUE = np.array([90, 40, 50])
 UPPER_BLUE = np.array([150, 255, 255])
 FLAT_WIDTH, FLAT_HEIGHT = 800, 400
 CROP_X, CROP_Y = 0.12, 0.15
+BANNER_INSET = 2                  # px trimmed inside the frame (of the 800 x 400 warp)
 # Output size of flatten() - the notebook's crop of its 800 x 400 warp
 BANNER_SIZE = (FLAT_WIDTH - 2 * int(FLAT_WIDTH * CROP_X), FLAT_HEIGHT - 2 * int(FLAT_HEIGHT * CROP_Y))
 
@@ -219,7 +220,7 @@ def flatten(image, detection, fit_banner=True):
     return cv2.resize(warped[y:y + h, x:x + w], BANNER_SIZE, interpolation=cv2.INTER_AREA)
 
 
-def banner_box(warped, frame_fraction=0.8, inset=6):
+def banner_box(warped, frame_fraction=0.8, inset=None):
     """(x, y, w, h) of the banner inside a warped board, or None.
 
     A row (column) belongs to the frame when more than frame_fraction of it is
@@ -227,6 +228,8 @@ def banner_box(warped, frame_fraction=0.8, inset=6):
     straight even if the warp is slightly off. The banner is the longest run
     of non-frame rows (columns). The frame is solid blue, while even a row
     through a long word (tops of SABOTAGE) has gaps between the letters."""
+    if inset is None:
+        inset = BANNER_INSET
     mask = mask_raw(warped) > 0
     height, width = mask.shape
     rows = mask[:, int(0.2 * width):int(0.8 * width)].mean(axis=1) < frame_fraction

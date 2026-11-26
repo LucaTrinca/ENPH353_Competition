@@ -54,6 +54,12 @@ ros2 launch controller_pkg drone_road_follow.launch.py
 # the camera work can't slow the flight control.
 ros2 launch controller_pkg drone_wall_ride.launch.py
 
+# Competition run - both drones with one command (after the simulation is up):
+# spawns drone 2, starts drone 1 5 s later (it starts the timer), drone 2 takes
+# off once drone 1 is clear of the spawn box. Restart the simulation between
+# runs (drone2 stays in the world). drone1_delay:=<s>, flight_params:=<yaml>.
+ros2 launch controller_pkg competition.launch.py
+
 # Second drone (clues 1 - 4): spawns "drone2" in the free respawn box (north-west
 # corner), waits until the first drone has left the box, reads clue 1 from just
 # south of it, rides the west wall north to clue 2, on to the north-west corner,
@@ -170,26 +176,37 @@ detections in ~1100 sign-free frames.
 `controller_pkg/clue_reader.py` reads a banner: it cuts the two lines into characters on the
 monospaced font's grid (spaces are empty grid slots; merged or broken letters are split or
 joined), crops each like the notebook (ink box + 4 px, 32x32) and classifies it with a CNN.
-The clue type is snapped to the closest of the 8 keywords. It reads all 113 detected boards in
-the team's photos correctly; from the drone, letters need to be ~8 px or taller in the camera
-image (boards up to ~2 m away with the 1280x960 side cameras).
+The clue type is snapped to the closest of the 8 keywords. From the drone, letters need to be
+~8 px or taller in the camera image (boards up to ~2 m away with the 1280x960 side cameras).
+
+Values can be 12 characters long (`FAME N GLORY`; the generator's default set has
+`D NEGATIVITY`), and the 12th is half cut off by the banner's own edge - the score tracker
+still wants it. So the banner crop stays 2 px inside the blue frame (it was 6 px, which cut
+off the half letter), the reader allows 12 value characters, and strips of the frame along the
+banner's edge (taller than the letters, or reaching the banner's top / bottom) are not
+characters. A half-cut round letter (O, Q, C, G, 6, 0) is still often misread: its left sliver
+looks the same.
 
 The CNN (`controller_pkg/models/clue_chars_cnn.onnx`) is the team notebook's architecture
 (Conv32-Pool-Conv64-Pool-Conv64-Dense128-Dropout 0.3, softmax over 0-9 A-Z). Its input is the
 crop's "blueness" (B - (G+R)/2) instead of grey, which ignores the lighting. It is trained on
 ~27,000 characters from banners drawn exactly as the competition does (clue_banner.png,
-UbuntuMono-R size 90) and degraded like the drone camera (lighting, crop errors, 5-40 px
-letters, noise), each cut by the same segmentation the reader uses. Results against the older
-HOG + SVM:
+UbuntuMono-R size 90, values up to 12 characters) and degraded like the drone camera
+(lighting, crop errors, 5-40 px letters, noise), each cut by the same segmentation the reader
+uses (98.3% validation character accuracy).
 
-| Test | CNN | SVM |
+Whole clues read right (type and value, spaces ignored - how the score tracker checks), against
+the team Colab's pipeline (inner-panel unwarp, contour slicing, grey 32x32 CNN trained on its
+100 synthetic boards):
+
+| Test | This reader | Colab pipeline |
 |---|---|---|
-| validation characters | 98.8% | 98.4% |
-| whole synthetic banners, letters 5-8 px | 64% | 61% |
-| whole synthetic banners, letters 12-40 px | 96.5-96.8% | 96.5-96.6% |
-| team photos (113 detected boards) | 113/113 | 113/113 |
-| banners saved in sim runs | 21/23 | 20/23 |
-| time per banner | 5.7 ms | 10.2 ms |
+| team photos, 121 sim frames of the 8 competition clues (8 have no complete board) | 113 (93%), 0 wrong | 79 (65%) |
+| 160 views of 40 boards with random text (up to 12 chars) spawned in the sim, drone camera settings, 0.45 - 1.1 m, up to 35 deg | 119 (74%) | 30 (19%) |
+| boards saved in our sim runs (236) | 226 | - |
+
+Most of the remaining misses on random boards are the half-cut 12th character, or views too
+far / oblique to find the board.
 
 Votes across views are weighted by board size times the CNN's confidence, so a small, unsure
 view counts for little. The drone runs the model with OpenCV's dnn module; training needs

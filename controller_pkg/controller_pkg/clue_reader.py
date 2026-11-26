@@ -34,7 +34,7 @@ import numpy as np
 BANNER_W, BANNER_H = 600, 400
 PITCH = 50.4                      # px per character (UbuntuMono at size 90)
 TYPE_X, VALUE_X = 250, 30         # where the generator starts each line
-TYPE_MAX, VALUE_MAX = 6, 11       # characters that fit on the banner
+TYPE_MAX, VALUE_MAX = 6, 12       # characters on the banner (a 12th is half cut off by its edge, e.g. FAME N GLORY)
 CHARACTERS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'   # notebook label order (sorted)
 KEYWORDS = ['SIZE', 'VICTIM', 'CRIME', 'TIME', 'PLACE', 'MOTIVE', 'WEAPON', 'BANDIT']
 CROP_SIZE = 32
@@ -69,10 +69,16 @@ def segment_line(ink, y_range, x_start, max_chars, threshold=0.35, min_area=40):
     # The line's height: most characters span it, so take the median box
     tops = np.median([s[cv2.CC_STAT_TOP] for s, _ in blobs])
     heights = np.median([s[cv2.CC_STAT_HEIGHT] for s, _ in blobs])
-    # Drop specks well outside the text band (logo bits, frame remnants)
+    # Drop specks well outside the text band (logo bits, frame remnants), and
+    # strips of the blue frame along the banner's edge: taller than the letters
+    # or running into the top / bottom of the banner, which no letter reaches
+    band_height = band.shape[0]
     blobs = [(s, c) for s, c in blobs
              if s[cv2.CC_STAT_TOP] + s[cv2.CC_STAT_HEIGHT] > tops + 0.3 * heights
-             and s[cv2.CC_STAT_TOP] < tops + 0.7 * heights]
+             and s[cv2.CC_STAT_TOP] < tops + 0.7 * heights
+             and s[cv2.CC_STAT_HEIGHT] < 1.3 * heights
+             and s[cv2.CC_STAT_TOP] > 0
+             and s[cv2.CC_STAT_TOP] + s[cv2.CC_STAT_HEIGHT] < band_height]
     if not blobs:
         return []
 
@@ -92,9 +98,16 @@ def segment_line(ink, y_range, x_start, max_chars, threshold=0.35, min_area=40):
     for stats, _ in blobs:
         x, y, w, h = (stats[cv2.CC_STAT_LEFT], stats[cv2.CC_STAT_TOP],
                       stats[cv2.CC_STAT_WIDTH], stats[cv2.CC_STAT_HEIGHT])
-        first = int(np.floor((x + 0.25 * PITCH - origin) / PITCH))
-        last = int(np.floor((x + w - 0.25 * PITCH - origin) / PITCH))
-        last = max(first, last)
+        if w <= 1.3 * PITCH:
+            # One character (no character is much wider than the pitch): the
+            # slot of its centre. Splitting at the boundaries cut a character in
+            # two when the banner's flattening stretched one side a little
+            first = last = int(np.floor((x + w / 2.0 - origin) / PITCH))
+        else:
+            # Touching characters: split at the slot boundaries
+            first = int(np.floor((x + 0.25 * PITCH - origin) / PITCH))
+            last = int(np.floor((x + w - 0.25 * PITCH - origin) / PITCH))
+            last = max(first, last)
         for k in range(first, last + 1):
             # A blob over several slots is split at the slot boundaries
             sx0 = max(x, int(origin + k * PITCH)) if last > first else x
@@ -108,7 +121,13 @@ def segment_line(ink, y_range, x_start, max_chars, threshold=0.35, min_area=40):
     first, last = min(slots), max(slots)
     if first < 0:
         first = 0
-    keys = range(first, min(last, first + max_chars - 1) + 1)
+    keys = list(range(first, min(last, first + max_chars - 1) + 1))
+    # Clue text has single spaces only: ink after two empty slots in a row is
+    # something else (an object in front of the board's edge, e.g. the truck)
+    for i in range(1, len(keys) - 1):
+        if keys[i] not in slots and keys[i + 1] not in slots:
+            keys = keys[:i]
+            break
     return [None if k not in slots else
             (slots[k][0], slots[k][1] + y0, slots[k][2], slots[k][3] + y0) for k in keys]
 

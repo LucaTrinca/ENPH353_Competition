@@ -179,7 +179,10 @@ class DroneWestRide(DroneWallRide):
         # even with the board at its northernmost (y 0.63)
         self.declare_parameter('clue4_heading_deg', -45.0)
         self.declare_parameter('slide_speed', 0.12)         # m/s north
-        self.declare_parameter('slide_max_y', 1.35)         # past the last clue 4 viewing point (0.63 + 0.47)
+        # Past the last clue 4 viewing point (0.63 + 0.47), with room for the y
+        # estimate's drift here (sliding along the north-south road, the optical
+        # flow can't see the motion along it): the board's bearing leads anyway
+        self.declare_parameter('slide_max_y', 1.7)
         self.declare_parameter('slide_gain', 0.8)           # m/s north per rad of the board right of the image centre
         self.declare_parameter('clue4_dwell', 3.0)          # s in front of clue 4
         self.declare_parameter('land_when_done', True)      # land at the end (out of drone 1's way)
@@ -261,6 +264,9 @@ class DroneWestRide(DroneWallRide):
         distance, angle = fit
         self.wall = (distance + LEFT_RANGE_Y * math.cos(angle), angle)
         self.wall_time = self.sim_time
+        if not self.ranging_height():
+            self.left_track.clear()
+            return
         # Known walls: fixes for the dead reckoning (position, and velocity
         # from how fast the distance changes)
         if self.facing(NORTH) and (self.x < -4.8 or self.y > NORTH_LANE_Y):
@@ -287,7 +293,7 @@ class DroneWestRide(DroneWallRide):
         # The front range is a narrow beam (0.3 rad) at the drone's height: it
         # passes over the 0.2 m boards and the truck
         steady_turn = abs(self.yaw_rate) < 0.2 and self.state not in ('WAIT_CLOCK', 'REGISTER_DELAY')
-        if not (steady_turn and not self.landed and self.fresh(self.front_time) and 0.3 < self.front < 7.0):
+        if not (steady_turn and self.ranging_height() and self.fresh(self.front_time) and 0.3 < self.front < 7.0):
             self.front_track.clear()
             return
         if self.facing(NORTH) and self.x < -4.4:
@@ -352,6 +358,11 @@ class DroneWestRide(DroneWallRide):
             f'flow frames {frames} measured {measured} used {used} (edge only {edge_only}), last flow {flow}, '
             f'alt {self.altitude:.2f} (set {self.altitude_setpoint:.2f}), '
             f'wind {self.disturbance[0]:+.2f} {self.disturbance[1]:+.2f}, front fixes: {fixes or "none"}')
+
+    def ranging_height(self):
+        """High enough for the range fixes: lower down (takeoff, landing) the
+        beams hit the ground - a landing once 'fixed' x by 4 m."""
+        return not self.landed and self.altitude is not None and self.altitude > 0.2
 
     def facing(self, heading):
         return (self.state not in ('WAIT_CLOCK', 'REGISTER_DELAY') and not self.landed
@@ -482,7 +493,9 @@ class DroneWestRide(DroneWallRide):
             return
         self.altitude_target = -0.1     # below the ground: it lands whatever the altimeter's offset
         self.hold(self.hold_point, self.yaw, dt)
-        if self.settled(self.altitude < 0.03 and abs(self.vertical_speed) < 0.05, 1.0):
+        # (The ground isn't level everywhere: the altimeter reads up to ~0.06 m
+        # on the ground away from the spawn)
+        if self.settled(self.altitude < 0.08 and abs(self.vertical_speed) < 0.05, 1.0):
             self.landed = True
             self.get_logger().info(f'Landed (estimate x {self.x:+.2f} y {self.y:+.2f})')
 
@@ -651,7 +664,9 @@ class DroneWestRide(DroneWallRide):
                                    f'of it) at y {self.y:+.2f} - holding {self.clue4_dwell:.0f} s')
             self.set_state('CLUE4_HOLD')
         elif elapsed > 20.0 or (not seen and self.y > self.slide_max_y):
-            if seen:
+            # (The board can flicker out of view for a frame or two)
+            recently = self.right_board_time is not None and self.sim_time - self.right_board_time < 3.0
+            if seen or recently:
                 self.set_state('CLUE4_HOLD')
             else:
                 self.get_logger().warn(f'Clue 4: not seen by y {self.y:+.2f}')
