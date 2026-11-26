@@ -38,6 +38,7 @@ setup(
             'drone_position_hold = controller_pkg.drone_position_hold:main',
             'drone_sign_tour = controller_pkg.drone_sign_tour:main',
             'drone_wall_ride = controller_pkg.drone_wall_ride:main',
+            'drone_west_ride = controller_pkg.drone_west_ride:main',
             'clue_finder = controller_pkg.clue_finder:main',
             'train_clue_reader = controller_pkg.train_clue_reader:main',
         ],

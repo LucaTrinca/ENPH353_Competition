@@ -18,9 +18,10 @@ instead of trusting contours alone:
      merged when the board is far away) are split; pieces in one slot (a
      letter broken up) are merged; empty slots are spaces.
   4. crop each character like the notebook (ink box + 4 px, 32 x 32) and
-     classify it: HOG features + an SVM trained on banners rendered exactly as
-     the competition does and degraded to look like the drone camera
-     (train_clue_reader.py), or the team's CNN exported to ONNX.
+     classify it with the team notebook's CNN, trained on banners rendered
+     exactly as the competition does and degraded to look like the drone
+     camera (train_clue_reader.py), run from ONNX with OpenCV. The older
+     HOG + SVM model still works (pass its .yml).
 
 The clue type is always one of the competition's keywords, so it is snapped
 to the closest one.
@@ -49,12 +50,6 @@ def blueness(banner):
     blue = np.clip(b - (g + r) / 2.0, 0, None)
     top = np.percentile(blue, 99.5)
     return blue / top if top > 10 else blue * 0
-
-
-def gray(banner):
-    """600 x 400 grayscale banner (for the notebook CNN, which was trained on grey crops)."""
-    image = cv2.resize(banner, (BANNER_W, BANNER_H), interpolation=cv2.INTER_LINEAR)
-    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
 
 def segment_line(ink, y_range, x_start, max_chars, threshold=0.35, min_area=40):
@@ -156,7 +151,7 @@ def snap_keyword(text):
 
 
 class ClueReader:
-    """Reads banners with a HOG + SVM model, or the team's CNN exported to ONNX."""
+    """Reads banners with the CNN (.onnx, default) or the older HOG + SVM (.yml)."""
 
     def __init__(self, model_path=None):
         if model_path is None:
@@ -170,14 +165,14 @@ class ClueReader:
             if self.svm.empty():
                 raise RuntimeError(f'Could not load the character model {model_path}')
 
-    def classify(self, ink, gray_image, boxes):
+    def classify(self, ink, boxes):
         """Characters and confidences (0..1) for a list of boxes."""
         if not boxes:
             return [], []
         if self.kind == 'onnx':
-            # Notebook CNN: grey 32 x 32 crops / 255, NHWC (1, 32, 32, 1), softmax over CHARACTERS
-            batch = np.stack([crop_character(gray_image, b).astype(np.float32) / 255.0
-                              for b in boxes])[..., None]
+            # CNN (team notebook architecture, train_clue_reader.py): 32 x 32
+            # blueness crops (0..1), NCHW, softmax over CHARACTERS
+            batch = np.stack([crop_character(ink, b) for b in boxes]).astype(np.float32)[:, None]
             self.net.setInput(batch)
             probs = self.net.forward()
             idx = probs.argmax(axis=1)
@@ -189,9 +184,9 @@ class ClueReader:
         # voting over frames (drone_wall_ride) and the keyword snap distance
         return chars, [1.0] * len(chars)
 
-    def read_line(self, ink, gray_image, slots):
+    def read_line(self, ink, slots):
         boxes = [s for s in slots if s is not None]
-        chars, conf = self.classify(ink, gray_image, boxes)
+        chars, conf = self.classify(ink, boxes)
         text, it = [], iter(chars)
         for s in slots:
             text.append(' ' if s is None else next(it))
@@ -200,23 +195,24 @@ class ClueReader:
     def read(self, banner):
         """Banner image -> dict(type, value, raw_type, type_distance, confidence)."""
         ink, type_slots, value_slots = segment(banner)
-        g = gray(banner)
-        raw_type, type_conf = self.read_line(ink, g, type_slots)
-        value, value_conf = self.read_line(ink, g, value_slots)
+        raw_type, type_conf = self.read_line(ink, type_slots)
+        value, value_conf = self.read_line(ink, value_slots)
         keyword, distance = snap_keyword(raw_type.replace(' ', ''))
         return {'type': keyword, 'value': value, 'raw_type': raw_type,
                 'type_distance': distance, 'confidence': min(type_conf, value_conf),
                 'location': KEYWORDS.index(keyword) + 1}
 
 
-def default_model_path():
-    """The trained SVM installed with the package (or next to this file when run from source)."""
-    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', 'clue_chars_svm.yml')
+DEFAULT_MODEL = 'clue_chars_cnn.onnx'
+
+
+def default_model_path(name=DEFAULT_MODEL):
+    """The trained model installed with the package (or next to this file when run from source)."""
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models', name)
     if os.path.exists(here):
         return here
     try:
         from ament_index_python.packages import get_package_share_directory
-        return os.path.join(get_package_share_directory('controller_pkg'), 'models',
-                            'clue_chars_svm.yml')
+        return os.path.join(get_package_share_directory('controller_pkg'), 'models', name)
     except Exception:  # noqa: BLE001
         return here

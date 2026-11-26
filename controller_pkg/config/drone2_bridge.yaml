@@ -1,0 +1,72 @@
+# Second drone (spawned as "drone2" by drone2.launch.py, sensor topics prefixed
+# drone2/). Only what drone_west_ride and its clue_finder use is bridged -
+# Gazebo doesn't render a camera nobody subscribes to, so its side cameras and
+# right range strip cost nothing.
+
+# Force controller (DroneForceController reads /model/<model name>/cmd_vel)
+- ros_topic_name: "/drone2/cmd_vel"
+  gz_topic_name: "/model/drone2/cmd_vel"
+  ros_type_name: "geometry_msgs/msg/Twist"
+  gz_type_name: "gz.msgs.Twist"
+  direction: ROS_TO_GZ
+
+# Reset to its spawn pose
+- ros_topic_name: "/drone2/drone/reset"
+  gz_topic_name: "/model/drone2/reset"
+  ros_type_name: "std_msgs/msg/Empty"
+  gz_type_name: "gz.msgs.Empty"
+  direction: ROS_TO_GZ
+
+# Front camera (clues 1 and 2)
+- ros_topic_name: "/drone2/camera/image_raw"
+  gz_topic_name: "/drone2/camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+# Right camera (clues 3 and 4, beside the drone). Lazy: bridged and rendered
+# only while clue_finder subscribes (at those two boards)
+- ros_topic_name: "/drone2/right_camera/image_raw"
+  gz_topic_name: "/drone2/right_camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+  lazy: true
+
+# Down camera (optical flow)
+- ros_topic_name: "/drone2/down_camera/image_raw"
+  gz_topic_name: "/drone2/down_camera/image_raw"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/drone2/altimeter"
+  gz_topic_name: "/drone2/altimeter"
+  ros_type_name: "ros_gz_interfaces/msg/Altimeter"
+  gz_type_name: "gz.msgs.Altimeter"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/drone2/imu"
+  gz_topic_name: "/drone2/imu"
+  ros_type_name: "sensor_msgs/msg/Imu"
+  gz_type_name: "gz.msgs.IMU"
+  direction: GZ_TO_ROS
+
+# Range strips (32FC1 metres) - down, left (west wall) and front
+- ros_topic_name: "/drone2/down_depth"
+  gz_topic_name: "/drone2/down_depth"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/drone2/left_depth"
+  gz_topic_name: "/drone2/left_depth"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS
+
+- ros_topic_name: "/drone2/front_depth"
+  gz_topic_name: "/drone2/front_depth"
+  ros_type_name: "sensor_msgs/msg/Image"
+  gz_type_name: "gz.msgs.Image"
+  direction: GZ_TO_ROS

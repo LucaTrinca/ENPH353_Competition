@@ -46,13 +46,23 @@ ros2 launch controller_pkg drone_road_follow.launch.py
 # 0.64 m in from the wall), turn, ride the east wall to the north-east corner,
 # turn, ride the north wall to the tunnel and touch it (+5 bonus), then climb
 # to 2.3 m, cross onto the mountain's plateau and read clue 8, stop timer,
-# hover. Reads clues 1, 5, 6, 7 and 8 (~2.5 min). tunnel_and_clue8:=false
+# hover. Submits clues 5 - 8 (~2 min; clues 1 - 4 are the second drone's). tunnel_and_clue8:=false
 # stops at the north-east corner instead. Starts two programs: drone_wall_ride (flight only) and
 # clue_finder (cameras: finds, reads and submits the clue boards to the score
 # tracker, saves them to ~/drone_images/clues_<time>/ with clues_read.csv, and
-# opens the left | front | right camera window). They are separate processes so
+# opens the camera window - front and left; the right camera is off). They are separate processes so
 # the camera work can't slow the flight control.
 ros2 launch controller_pkg drone_wall_ride.launch.py
+
+# Second drone (clues 1 - 4): spawns "drone2" in the free respawn box (north-west
+# corner), waits until the first drone has left the box, reads clue 1 from just
+# south of it, rides the west wall north to clue 2, on to the north-west corner,
+# east along the north wall and down to clue 3, then south of the road loop
+# to clue 4 (read with the right camera), and lands. ~75 s. Everything
+# under /drone2; it never touches the timer and only submits clues 1 - 4 (the
+# first drone only 5 - 8). Start it after the simulation, alongside
+# drone_wall_ride.launch.py. flight_params:=<yaml> overrides its parameters.
+ros2 launch controller_pkg drone2.launch.py
 
 # Drone keyboard teleop (keep the teleop window focused)
 #   Space/Ctrl up/down, W/S forward/back, A/D left/right, Q/E rotate, L save camera image,
@@ -88,6 +98,64 @@ follower's older wind estimator assumed a mass-independent force, which is why i
 The competition launch only bridges `/camera/image_raw`. The drone launch files bridge the
 other sensors with `controller_pkg/config/drone_sensors_bridge.yaml`.
 
+## Second drone
+
+The rules allow two custom robots. `drone2.launch.py` spawns the same drone
+model with three xacro arguments (`my_robot.urdf.xacro`):
+
+| Argument | First drone | Second drone | Why |
+|---|---|---|---|
+| `prefix` | `` | `drone2/` | its sensor topics become `/drone2/imu`, `/drone2/camera/image_raw`, ... |
+| `left_range` | `false` | `true` | a left range strip (`/drone2/left_depth`) for riding the west wall on its left |
+| `sensor_systems` | `true` | `false` | the IMU and altimeter *systems* are world-wide: one copy serves every drone. A second copy published every altimeter twice with different reference heights (0.1 m altitude jumps; once sent drone 2 to 14 m) |
+
+Its controller is `drone_west_ride` (a subclass of `drone_wall_ride`: same wind
+cancelling, optical flow, altitude hold and stuck watchdog) and its own
+`clue_finder` (front camera, plus the right camera only at clue 4; submits
+locations 1 - 4). Topic names in both nodes are relative, so the first drone
+runs at the root and the second under `drone2`; `/clock` and `/score_tracker`
+are shared.
+
+Route (x east, y north) and why:
+
+| Step | Where | How it reads / navigates |
+|---|---|---|
+| Clue 1 (-5.81, -1.64), faces south | hover 0.66 m south of it | front camera |
+| Clue 2 (-5.16, 1.11 - 1.6), faces south | ride the west wall north at 0.5 m, stop when seen | front camera, ~25 deg from the side: the fir at (-5, 0.9) stands right in front of it |
+| Corner | on up the west wall to 0.5 m from the north wall | turn east here: both walls are in range before and after |
+| Clue 3 (-4.0, 1.67), faces west | east along the north wall (north of the fir at (-5, 1.8)), then down to 0.65 m in front of it | front camera, head on |
+| Clue 4 (-0.83, 0 - 0.63), faces north | diagonally to the south-west of the road loop, east along a lane just south of it (y 0.05: the truck drives the loop, and under the down camera it drags the optical flow along) to 0.5 m from the plateau, turn to -45 deg, slide north | right camera (looking south-west, 45 deg off the board's facing); it slides until the board is centred in the image. Straight north of the board an oak hides it |
+| End | | lands, out of drone 1's way |
+
+Things the route is built around:
+
+- **The west half has almost no texture for the optical flow**: flat green paint
+  and asphalt with straight white edges. Over plain paint the flow measures
+  nothing; along a lone straight edge it only sees the motion across it, and
+  phase correlation reported ~0 along it - the estimate then said "standing
+  still" while the drone sped up (1.7 m of error in one test). Drone 2 uses a
+  wider crop of the down image (`flow_crop` 0.55) and `flow_min_isotropy` 0.1:
+  when the texture's gradients all run one way, only the velocity across the
+  lines is corrected and the IMU carries the rest.
+- **So it navigates by the range sensors**, and dead reckoning only bridges
+  gaps: facing north on the west wall line, x from the west wall (left range)
+  and y from the north wall (front range); facing east near the north wall, y
+  from the north wall (left range); facing within 50 deg of east on the north
+  wall line or south of the loop, x from the plateau's west face (front range;
+  the face is a plane at x 0.14 at the sensor's height). A straight line is fitted
+  through the last readings over time, so a moving drone gets position *and*
+  velocity fixes, and a tree passing through the beam is ignored.
+- A row of fir trees stands at x = -5.0. Their crowns (0.51 m tall, 0.17 m
+  radius, ~5 cm collision) confuse the flow and the range sensors, so the drone
+  rides 0.5 m from the west wall and goes round the north side of the fir next
+  to clue 3 instead of through the gap (clue 2 stands in that gap).
+- The truck drives round the road loop (0.08 m tall) and the pedestrian crosses
+  at y -0.5: drone 2 flies over the truck at 0.35 m and never near the crossing.
+- A gust at liftoff can push a drone ~0.6 m, so drone 2 only takes off once
+  drone 1 has ridden the south wall for 6 s (or after 5 s if drone 1 isn't
+  running).
+- `clues_3_4:=false` (in a `flight_params` file) stops after clue 2.
+
 ## Clue boards
 
 `controller_pkg/sign_detector.py` finds a complete clue board in an image. It is the team
@@ -101,30 +169,42 @@ detections in ~1100 sign-free frames.
 
 `controller_pkg/clue_reader.py` reads a banner: it cuts the two lines into characters on the
 monospaced font's grid (spaces are empty grid slots; merged or broken letters are split or
-joined), crops each like the notebook (ink box + 4 px, 32x32) and classifies it with HOG
-features + an SVM. The clue type is snapped to the closest of the 8 keywords. It reads all 113
-detected boards in the team's photos correctly; from the drone, letters need to be ~8 px or
-taller in the camera image (boards up to ~2 m away with the 1280x960 side cameras).
+joined), crops each like the notebook (ink box + 4 px, 32x32) and classifies it with a CNN.
+The clue type is snapped to the closest of the 8 keywords. It reads all 113 detected boards in
+the team's photos correctly; from the drone, letters need to be ~8 px or taller in the camera
+image (boards up to ~2 m away with the 1280x960 side cameras).
 
-The SVM (`controller_pkg/models/clue_chars_svm.yml`) is trained on banners drawn exactly as the
-competition does (clue_banner.png, UbuntuMono-R size 90) and degraded like the drone camera
-(lighting, crop errors, 5-40 px letters, noise):
+The CNN (`controller_pkg/models/clue_chars_cnn.onnx`) is the team notebook's architecture
+(Conv32-Pool-Conv64-Pool-Conv64-Dense128-Dropout 0.3, softmax over 0-9 A-Z). Its input is the
+crop's "blueness" (B - (G+R)/2) instead of grey, which ignores the lighting. It is trained on
+~27,000 characters from banners drawn exactly as the competition does (clue_banner.png,
+UbuntuMono-R size 90) and degraded like the drone camera (lighting, crop errors, 5-40 px
+letters, noise), each cut by the same segmentation the reader uses. Results against the older
+HOG + SVM:
+
+| Test | CNN | SVM |
+|---|---|---|
+| validation characters | 98.8% | 98.4% |
+| whole synthetic banners, letters 5-8 px | 64% | 61% |
+| whole synthetic banners, letters 12-40 px | 96.5-96.8% | 96.5-96.6% |
+| team photos (113 detected boards) | 113/113 | 113/113 |
+| banners saved in sim runs | 21/23 | 20/23 |
+| time per banner | 5.7 ms | 10.2 ms |
+
+Votes across views are weighted by board size times the CNN's confidence, so a small, unsure
+view counts for little. The drone runs the model with OpenCV's dnn module; training needs
+PyTorch and onnx (CPU wheels are enough, ~8 minutes on a laptop):
 
 ```bash
-cd ~/2026_competition_ws/src/controller_pkg && python3 -m controller_pkg.train_clue_reader --banners 3000
+python3 -m venv --system-site-packages ~/clue_venv
+~/clue_venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+~/clue_venv/bin/pip install "numpy<2" "ml-dtypes<0.5" "onnx<1.18"   # numpy 2 breaks ROS's OpenCV
+cd ~/2026_competition_ws/src/controller_pkg && ~/clue_venv/bin/python -m controller_pkg.train_clue_reader
 cd ~/2026_competition_ws && colcon build --packages-select controller_pkg
 ```
 
-To use the notebook's CNN instead, export it to ONNX in Colab and pass its path as the wall
-`clue_finder`'s `clue_model` parameter (OpenCV runs it; no TensorFlow needed on the robot):
-
-```python
-!pip install tf2onnx
-import tensorflow as tf, tf2onnx
-model = tf.keras.models.load_model('fizz_detective_cnn.h5')
-spec = (tf.TensorSpec((None, 32, 32, 1), tf.float32, name='input'),)
-tf2onnx.convert.from_keras(model, input_signature=spec, output_path='fizz_detective_cnn.onnx')
-```
+`--model svm` trains the old SVM instead (no PyTorch needed); pass a model's path as
+`clue_finder`'s `clue_model` parameter to use it.
 
 `clue_finder` sends each reading to `/score_tracker` as soon as the board has left the view
 (`submit_clues`, on by default) with location = the clue type's number (SIZE 1, VICTIM 2,

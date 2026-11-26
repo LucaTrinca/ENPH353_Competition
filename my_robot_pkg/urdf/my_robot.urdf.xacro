@@ -4,6 +4,14 @@
     <!-- Select the robot: "drone" (default) or "car" (original differential drive robot)
          e.g. xacro my_robot.urdf.xacro robot_type:=car -->
     <xacro:arg name="robot_type" default="drone" />
+    <!-- Second drone - prefix for every sensor topic (e.g. prefix:=drone2/ gives
+         drone2/imu), and an extra left-facing range strip for riding a wall on
+         the left. The defaults give the first drone, unchanged. -->
+    <xacro:arg name="prefix" default="" />
+    <xacro:arg name="left_range" default="false" />
+    <!-- false for the second drone - the first drone's IMU and altimeter systems
+         already serve the whole world (see drone_gazebo.xacro) -->
+    <xacro:arg name="sensor_systems" default="true" />
 
     <xacro:include filename="$(find my_robot_pkg)/urdf/common_properties.xacro" />
 

@@ -33,16 +33,22 @@
         </plugin>
     </gazebo>
 
-    <!-- Required for the IMU and altimeter sensors below to publish -->
-    <gazebo>
-        <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
-        </plugin>
-    </gazebo>
+    <!-- Required for the IMU and altimeter sensors below to publish. These are
+         world-wide systems - one copy serves every IMU and altimeter in the
+         world, including on robots spawned later. A second drone must not load
+         them again (sensor_systems false) - every copy publishes every sensor,
+         each with its own altitude reference, so readings alternate between them -->
+    <xacro:if value="$(arg sensor_systems)">
+        <gazebo>
+            <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu">
+            </plugin>
+        </gazebo>
 
-    <gazebo>
-        <plugin filename="gz-sim-altimeter-system" name="gz::sim::systems::Altimeter">
-        </plugin>
-    </gazebo>
+        <gazebo>
+            <plugin filename="gz-sim-altimeter-system" name="gz::sim::systems::Altimeter">
+            </plugin>
+        </gazebo>
+    </xacro:if>
 
     <gazebo>
         <plugin filename="gz-sim-pose-publisher-system"
@@ -65,7 +71,7 @@
             <always_on>1</always_on>
             <update_rate>100</update_rate>
             <visualize>false</visualize>
-            <topic>imu</topic>
+            <topic>$(arg prefix)imu</topic>
             <imu>
                 <angular_velocity>
                     <x><noise type="gaussian"><mean>0</mean><stddev>0.002</stddev></noise></x>
@@ -85,7 +91,7 @@
             <always_on>1</always_on>
             <update_rate>30</update_rate>
             <visualize>false</visualize>
-            <topic>altimeter</topic>
+            <topic>$(arg prefix)altimeter</topic>
             <altimeter>
                 <vertical_position>
                     <noise type="gaussian"><mean>0</mean><stddev>0.01</stddev></noise>
@@ -122,7 +128,7 @@
             <always_on>1</always_on>
             <update_rate>15</update_rate>
             <visualize>true</visualize>
-            <topic>down_camera/image_raw</topic>
+            <topic>$(arg prefix)down_camera/image_raw</topic>
         </sensor>
     </gazebo>
 
@@ -150,7 +156,7 @@
             <!-- Low rate - only needed when reading a clue board -->
             <update_rate>5</update_rate>
             <visualize>true</visualize>
-            <topic>camera/image_raw</topic>
+            <topic>$(arg prefix)camera/image_raw</topic>
         </sensor>
     </gazebo>
 
@@ -161,7 +167,7 @@
     <gazebo reference="down_range_link">
         <sensor type="depth_camera" name="down_range">
             <pose relative_to='down_range_link'>0 0 0 0 0 0</pose>
-            <topic>down_depth</topic>
+            <topic>$(arg prefix)down_depth</topic>
             <update_rate>30</update_rate>
             <always_on>1</always_on>
             <visualize>false</visualize>
@@ -213,7 +219,7 @@
                 <always_on>1</always_on>
                 <update_rate>5</update_rate>
                 <visualize>true</visualize>
-                <topic>${side}_camera/image_raw</topic>
+                <topic>$(arg prefix)${side}_camera/image_raw</topic>
             </sensor>
         </gazebo>
     </xacro:macro>
@@ -228,7 +234,7 @@
         <gazebo reference="${name}_range_link">
             <sensor type="depth_camera" name="${name}_range">
                 <pose relative_to='${name}_range_link'>0 0 0 0 0 0</pose>
-                <topic>${name}_depth</topic>
+                <topic>$(arg prefix)${name}_depth</topic>
                 <update_rate>${rate}</update_rate>
                 <always_on>1</always_on>
                 <visualize>false</visualize>
@@ -255,4 +261,7 @@
 
     <xacro:range_sensor_gazebo name="right" width="32" height="4" fov="1.2" rate="30" />
     <xacro:range_sensor_gazebo name="front" width="8" height="4" fov="0.3" rate="15" />
+    <xacro:if value="$(arg left_range)">
+        <xacro:range_sensor_gazebo name="left" width="32" height="4" fov="1.2" rate="30" />
+    </xacro:if>
 </robot>

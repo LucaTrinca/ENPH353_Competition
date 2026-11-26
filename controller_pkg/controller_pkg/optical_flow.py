@@ -26,7 +26,8 @@ class GroundVelocityEstimator:
     MIN_FRAME_DIFFERENCE = 0.5
 
     def __init__(self, horizontal_fov_rad, image_width_px, smoothing=0.5,
-                 crop_fraction=1.0, min_texture=0.0, downscale=0.5, baseline=0.0):
+                 crop_fraction=1.0, min_texture=0.0, downscale=0.5, baseline=0.0,
+                 min_isotropy=0.0):
         """crop_fraction: use only this central fraction of the image (e.g. 0.5),
         so walls or cliffs near the edges of the wide view don't pull the
         estimate; the ground straight below is at the measured height.
@@ -36,7 +37,13 @@ class GroundVelocityEstimator:
         baseline: compare with the frame from about this many seconds ago
         instead of the previous one. High up, the ground moves well under a
         pixel between frames and the shift is lost in the noise; over a longer
-        baseline it becomes several pixels (0 = previous frame)."""
+        baseline it becomes several pixels (0 = previous frame).
+        min_isotropy: when the texture runs in one direction only (a straight
+        road edge on flat paint: smallest / largest eigenvalue of the gradient
+        structure tensor below this), the shift along the lines can't be
+        measured - phase correlation reports ~0 there. Then `constraint` is set
+        to the (forward, left) unit vector across the lines, the only direction
+        the estimate is good for (0 = never)."""
         self.tan_half_fov = math.tan(horizontal_fov_rad / 2.0)
         self.image_width_px = image_width_px
         self.smoothing = smoothing
@@ -44,6 +51,8 @@ class GroundVelocityEstimator:
         self.min_texture = min_texture
         self.downscale = downscale
         self.baseline = baseline
+        self.min_isotropy = min_isotropy
+        self.constraint = None   # (forward, left) unit vector: the only measured direction
         self.history = deque(maxlen=20)   # (stamp, grey) for the long baseline
         self.prev = None
         self.prev_time = None
@@ -78,6 +87,7 @@ class GroundVelocityEstimator:
             self.history.clear()
             self.valid = False
             return None
+        self.constraint = self.measured_direction(gray) if self.min_isotropy > 0.0 else None
         if self.window is None or self.window.shape != gray.shape:
             self.window = cv2.createHanningWindow(gray.shape[::-1], cv2.CV_32F)
 
@@ -119,3 +129,16 @@ class GroundVelocityEstimator:
         self.left = a * self.left + (1.0 - a) * left
         self.valid = True
         return self.forward, self.left
+
+    def measured_direction(self, gray):
+        """None if the texture has gradients in every direction, else the
+        (forward, left) unit vector across its lines."""
+        gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+        jxx, jxy, jyy = float(np.mean(gx * gx)), float(np.mean(gx * gy)), float(np.mean(gy * gy))
+        values, vectors = np.linalg.eigh(np.array([[jxx, jxy], [jxy, jyy]]))
+        if values[1] <= 0.0 or values[0] / values[1] >= self.min_isotropy:
+            return None
+        u, v = vectors[:, 1]      # strongest gradient (image x right, y down), across the lines
+        # Image y is forward and image x is left (see update)
+        return float(v), float(u)

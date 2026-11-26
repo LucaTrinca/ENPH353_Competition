@@ -211,5 +211,9 @@
     <!-- Right range 0.06 m right of the centre, front range 0.16 m ahead of it -->
     <xacro:range_sensor name="right" x="0" y="-0.06" yaw="${-pi / 2.0}" />
     <xacro:range_sensor name="front" x="0.16" y="0" yaw="0" />
+    <!-- Second drone only - left range, the mirror of the right one -->
+    <xacro:if value="$(arg left_range)">
+        <xacro:range_sensor name="left" x="0" y="0.06" yaw="${pi / 2.0}" />
+    </xacro:if>
 
 </robot>

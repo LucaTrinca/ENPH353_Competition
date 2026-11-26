@@ -37,18 +37,22 @@
   gz_type_name: "gz.msgs.Image"
   direction: GZ_TO_ROS
 
-# Side cameras (clues beside the drone)
+# Side cameras (clues beside the drone). Lazy: bridged only while a ROS node
+# subscribes (clue_finder subscribes only when they can see boards), and Gazebo
+# only renders a camera someone is subscribed to, so an unused camera is free
 - ros_topic_name: "/left_camera/image_raw"
   gz_topic_name: "/left_camera/image_raw"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "gz.msgs.Image"
   direction: GZ_TO_ROS
+  lazy: true
 
 - ros_topic_name: "/right_camera/image_raw"
   gz_topic_name: "/right_camera/image_raw"
   ros_type_name: "sensor_msgs/msg/Image"
   gz_type_name: "gz.msgs.Image"
   direction: GZ_TO_ROS
+  lazy: true
 
 # Horizontal range sensors (depth strips, 32FC1 metres) for wall riding
 - ros_topic_name: "/right_depth"

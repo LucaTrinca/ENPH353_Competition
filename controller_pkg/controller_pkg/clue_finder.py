@@ -54,9 +54,10 @@ from std_msgs.msg import Empty, String
 
 from controller_pkg import clue_reader, sign_detector
 
-WINDOW = 'Drone Cameras (left | front | right)'
-CAMERAS = [('left', '/left_camera/image_raw'), ('front', '/camera/image_raw'),
-           ('right', '/right_camera/image_raw')]
+WINDOW = 'Drone Cameras'
+# Relative names: a drone run in a namespace (drone2) gets its own cameras
+CAMERAS = [('left', 'left_camera/image_raw'), ('front', 'camera/image_raw'),
+           ('right', 'right_camera/image_raw')]
 # Horizontal field of view of each camera [rad] (drone_gazebo.xacro)
 CAMERA_FOV = {'left': math.radians(70.0), 'front': math.radians(60.0), 'right': math.radians(70.0)}
 
@@ -96,12 +97,24 @@ class ClueFinder(Node):
         self.declare_parameter('views_to_read', 5)          # biggest views of each board that are read
         self.declare_parameter('min_letter_px', 6.0)        # views with smaller letters are not read (garbage)
         self.declare_parameter('read_clues', True)
-        self.declare_parameter('clue_model', '')            # '' = trained SVM, or the team CNN as .onnx
+        self.declare_parameter('clue_model', '')            # '' = trained CNN (.onnx); a .yml = older SVM
         self.declare_parameter('submit_clues', True)        # send readings to /score_tracker
+        # Clue locations this drone submits. A second drone covers clues 1 - 4, and
+        # the score tracker keeps the latest answer per location, so a misread
+        # here must never overwrite its answers
+        self.declare_parameter('submit_locations', [5, 6, 7, 8])
         # Controller states to look for boards in (not on the ground, not once done)
         # (TAKEOFF too: clue 1 faces the spawn, the front camera sees it while climbing)
         self.declare_parameter('active_states', ['TAKEOFF', 'RIDE', 'TURN', 'BACK_OFF', 'CLIMB',
-                                                 'CROSS', 'CLUE8', 'CLUE8_HOLD'])
+                                                 'CROSS', 'CLUE8', 'CLUE8_HOLD', 'RECOVER'])
+        # Cameras used. The right one faces the arena wall the whole ride (it has
+        # never read a board), so it is off: unsubscribed, the bridge (lazy) stops
+        # asking Gazebo for it and Gazebo stops rendering it - 40% of the pixels
+        self.declare_parameter('cameras', ['front', 'left'])
+        # States the side cameras are subscribed in: the low wall ride. Up high
+        # (climb, plateau, clue 8) only the front camera is useful
+        # (RECOVER too: a recovery during the wall ride shouldn't cut a board short)
+        self.declare_parameter('side_camera_states', ['TAKEOFF', 'TURN', 'RIDE', 'RECOVER'])
         self.declare_parameter('record_interval', 0.0)      # s between saved raw frames, 0 = off
         self.declare_parameter('photo_dir', '~/drone_images')
 
@@ -115,7 +128,10 @@ class ClueFinder(Node):
         self.views_to_read = int(p('views_to_read'))
         self.min_letter_px = float(p('min_letter_px'))
         self.submit_clues = bool(p('submit_clues'))
+        self.submit_locations = [int(n) for n in p('submit_locations')]
         self.active_states = list(p('active_states'))
+        self.cameras = [(name, topic) for name, topic in CAMERAS if name in list(p('cameras'))]
+        self.side_camera_states = list(p('side_camera_states'))
         self.record_interval = float(p('record_interval'))
         self.folder = os.path.join(os.path.expanduser(p('photo_dir')),
                                    datetime.now().strftime('clues_%Y%m%d_%H%M%S'))
@@ -129,19 +145,22 @@ class ClueFinder(Node):
 
         self.bridge = CvBridge()
         self.score_pub = self.create_publisher(String, '/score_tracker', 10)
-        self.flushed_pub = self.create_publisher(Empty, '/drone/clues_flushed', 1)
+        self.flushed_pub = self.create_publisher(Empty, 'drone/clues_flushed', 1)
         # Direction of every complete board seen (the flight controller uses
         # boards at known places to correct its position)
-        self.bearing_pub = self.create_publisher(PointStamped, '/drone/board_bearing', 10)
+        self.bearing_pub = self.create_publisher(PointStamped, 'drone/board_bearing', 10)
         # Each board read: "camera,location,TYPE,VALUE" (the flight controller
         # uses known boards as landmarks)
-        self.identified_pub = self.create_publisher(String, '/drone/board_identified', 10)
-        self.frames = {}
-        for name, topic in CAMERAS:
-            self.create_subscription(Image, topic, self.make_camera_callback(name), 1)
-        self.create_subscription(String, '/drone/state', self.state_callback, 10)
-        self.create_subscription(String, '/drone/status', self.status_callback, 1)
-        self.create_subscription(PoseStamped, '/drone/pose_estimate', self.pose_callback, 1)
+        self.identified_pub = self.create_publisher(String, 'drone/board_identified', 10)
+        self.frames = {}            # camera -> latest message
+        self.processed = {}         # camera -> stamp of the last frame processed
+        self.images = {}            # camera -> last converted frame (for the window)
+        self.subscriptions_by_camera = {}
+        self.frame_counts = {}
+        self.create_timer(5.0, self.log_cameras)
+        self.create_subscription(String, 'drone/state', self.state_callback, 10)
+        self.create_subscription(String, 'drone/status', self.status_callback, 1)
+        self.create_subscription(PoseStamped, 'drone/pose_estimate', self.pose_callback, 1)
 
         self.state = None           # controller state, None = never heard (look all the time)
         self.status = ''
@@ -152,17 +171,54 @@ class ClueFinder(Node):
         self.submitted = {}         # location -> value sent
         self.latest_detections = {}
         self.last_record = None
-        self.get_logger().info(f'Clue finder started, saving to {self.folder}')
+        self.update_subscriptions()
+        self.get_logger().info(f'Clue finder started, saving to {self.folder} '
+                               f'(cameras: {", ".join(n for n, _ in self.cameras)})')
 
     # ---------------------------------------------------------------- inputs
 
     def make_camera_callback(self, name):
         def callback(msg):
             self.frames[name] = msg
+            self.frame_counts[name] = self.frame_counts.get(name, 0) + 1
         return callback
 
+    def log_cameras(self):
+        """Every 5 s: frames received per camera (a camera that stops is obvious)."""
+        rates = ', '.join(f'{name} {self.frame_counts.get(name, 0) / 5.0:.1f} Hz'
+                          for name in self.subscriptions_by_camera) or 'none subscribed'
+        self.get_logger().info(f'Cameras ({self.state}): {rates}')
+        self.frame_counts = {}
+
     def state_callback(self, msg):
-        self.state = msg.data
+        if msg.data != self.state:
+            self.state = msg.data
+            self.update_subscriptions()
+
+    def wanted(self, name):
+        """Whether a camera should be subscribed in the current state."""
+        if self.state is None:
+            return True             # controller not heard yet: look with everything
+        if self.state not in self.active_states:
+            return False
+        return name == 'front' or self.state in self.side_camera_states
+
+    def update_subscriptions(self):
+        """Subscribe only to the cameras that can see boards now. The bridge is
+        lazy, so an unsubscribed camera is neither copied nor rendered."""
+        for name, topic in self.cameras:
+            subscribed = name in self.subscriptions_by_camera
+            if self.wanted(name) and not subscribed:
+                self.subscriptions_by_camera[name] = self.create_subscription(
+                    Image, topic, self.make_camera_callback(name), 1)
+            elif not self.wanted(name) and subscribed:
+                self.destroy_subscription(self.subscriptions_by_camera.pop(name))
+                self.frames.pop(name, None)
+                self.images.pop(name, None)
+                self.latest_detections.pop(name, None)
+                if name in self.events:
+                    # A board was in view: read it now
+                    self.save_board(name, self.events.pop(name))
 
     def status_callback(self, msg):
         self.status = msg.data
@@ -177,25 +233,31 @@ class ClueFinder(Node):
 
     def step(self):
         """Process the latest frame of each camera. Returns the window image (or None)."""
+        if self.state == 'DONE' and not self.flushed:
+            # The flight is over (the cameras are unsubscribed by now): read and
+            # submit boards still in view, then tell the controller it can stop the timer
+            self.flush()
         if not self.frames:
             return None
-        stamps = [m.header.stamp.sec + m.header.stamp.nanosec / 1e9 for m in self.frames.values()]
-        now = max(stamps)
-        images = {name: self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-                  for name, msg in list(self.frames.items())}
+        stamps = {name: m.header.stamp.sec + m.header.stamp.nanosec / 1e9
+                  for name, m in self.frames.items()}
+        now = max(stamps.values())
+        # Only frames that arrived since the last step are converted and searched
+        images = {}
+        for name, msg in list(self.frames.items()):
+            if self.processed.get(name) != stamps[name]:
+                self.processed[name] = stamps[name]
+                images[name] = self.images[name] = self.bridge.imgmsg_to_cv2(
+                    msg, desired_encoding='bgr8')
         if self.looking():
             self.find_boards(images, now)
-        if self.state == 'DONE' and not self.flushed:
-            # The flight is over: read and submit boards still in view, then
-            # tell the controller it can stop the timer
-            self.flush()
         if (self.record_interval > 0.0
                 and (self.last_record is None or now - self.last_record >= self.record_interval)):
             self.last_record = now
             os.makedirs(os.path.join(self.folder, 'frames'), exist_ok=True)
             for name, image in images.items():
                 cv2.imwrite(os.path.join(self.folder, 'frames', f'{now:08.1f}_{name}.png'), image)
-        return self.build_window(images) if self.show_cameras else None
+        return self.build_window(self.images) if self.show_cameras else None
 
     def flush(self):
         for camera in list(self.events):
@@ -253,7 +315,10 @@ class ClueFinder(Node):
                 # letter of a real keyword (a blurry view reads as garbage)
                 if reading['value'] and reading['type_distance'] <= 1:
                     key = (reading['type'], reading['value'])
-                    votes[key] = votes.get(key, 0.0) + view_detection.area
+                    # Weighted by size and by the CNN's confidence (its least sure
+                    # character), so a small, unsure view can't outvote clear ones
+                    weight = view_detection.area * max(0.05, reading['confidence'])
+                    votes[key] = votes.get(key, 0.0) + weight
                     frames += 1
         reading = max(votes, key=votes.get) if votes else None
         previous = next((b for b in self.boards
@@ -305,7 +370,9 @@ class ClueFinder(Node):
             self.identified_pub.publish(msg)
         if self.submit_clues and reading is not None:
             location = clue_reader.KEYWORDS.index(reading[0]) + 1
-            if self.submitted.get(location) != reading[1]:
+            if location not in self.submit_locations:
+                self.get_logger().info(f'Clue {location} is not this drone\'s - not submitted')
+            elif self.submitted.get(location) != reading[1]:
                 self.submitted[location] = reading[1]
                 msg = String()
                 msg.data = f'{self.team_id},{self.team_password},{location},{reading[1]}'
@@ -326,7 +393,7 @@ class ClueFinder(Node):
 
     def build_window(self, images):
         tiles = []
-        for name, _ in CAMERAS:
+        for name, _ in self.cameras:
             image = images.get(name)
             if image is None:
                 tiles.append(np.zeros((240, 320, 3), np.uint8))
@@ -353,8 +420,9 @@ def main(args=None):
     rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
     node = ClueFinder()
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+    window = WINDOW if node.get_namespace() == '/' else f'{WINDOW} ({node.get_namespace().strip("/")})'
     if node.show_cameras:
-        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
     # One thread: ROS callbacks, the camera work and the window all run here
     next_step = time.monotonic()
     try:
@@ -364,7 +432,7 @@ def main(args=None):
                 next_step = time.monotonic() + node.period
                 frame = node.step()
                 if frame is not None:
-                    cv2.imshow(WINDOW, frame)
+                    cv2.imshow(window, frame)
             if node.show_cameras:
                 cv2.waitKey(1)
     except KeyboardInterrupt:

@@ -43,7 +43,7 @@ def generate_launch_description():
                 'team_id': 'TeamFizz',
                 'team_password': 'pass1234',
                 'show_cameras': True,
-                # '' = trained SVM, or a .onnx export of the team CNN
+                # '' = trained CNN (models/clue_chars_cnn.onnx); a .yml = older SVM
                 'clue_model': '',
                 # Send readings to /score_tracker (location = clue type number, SIZE 1 ... BANDIT 8)
                 'submit_clues': True,

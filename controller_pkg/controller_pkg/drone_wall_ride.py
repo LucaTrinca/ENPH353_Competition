@@ -99,6 +99,13 @@ LEGS = [
 ]
 # States in which the drone is high above the ground (ground clearance floor applies)
 HIGH_STATES = ('CLIMB', 'CROSS', 'CLUE8', 'CLUE8_HOLD', 'DONE')
+# States the stuck watchdog watches (the rest wait on purpose)
+WATCHED_STATES = ('TAKEOFF', 'TURN', 'RIDE', 'BACK_OFF', 'CLIMB', 'CROSS', 'CLUE8')
+# Arena walls (collision planes, fast_empty.sdf): the drone rides the y = -2.75,
+# x = +6 and y = +2.75 walls
+EAST_WALL_X = 6.0
+SOUTH_WALL_Y = -2.75
+NORTH_WALL_Y = 2.75
 
 
 def clamp(value, limit):
@@ -160,7 +167,9 @@ class DroneWallRide(Node):
         self.declare_parameter('ride_altitude', 0.35)       # m above the start (walls are 0.5 m tall)
         self.declare_parameter('wall_distance', 0.4)        # m, drone centre to the wall
         self.declare_parameter('corner_distance', 0.4)      # m, drone centre to the wall ahead at a corner
-        self.declare_parameter('cruise_speed', 0.35)        # m/s along the walls
+        self.declare_parameter('cruise_speed', 0.35)        # m/s along the walls while a clue board is in view
+        self.declare_parameter('fast_speed', 0.8)           # m/s along the walls with no board in view
+        self.declare_parameter('board_slow_time', 1.5)      # s at cruise_speed after any camera last saw a board
         self.declare_parameter('corner_gate', 0.6)          # fraction of a wall's length before the wall ahead counts
         self.declare_parameter('max_wall_range', 1.5)       # m, right range readings beyond this are ignored
         self.declare_parameter('wall_search_speed', 0.15)   # m/s sideways toward the wall when it's lost
@@ -187,6 +196,7 @@ class DroneWallRide(Node):
         self.declare_parameter('flow_max_vertical_speed', 0.15)
         self.declare_parameter('flow_crop', 0.35)           # keeps the wall beside the drone out of view
         self.declare_parameter('flow_min_texture', 6.0)
+        self.declare_parameter('flow_min_isotropy', 0.0)    # > 0: along a lone straight edge only the motion across it counts
         self.declare_parameter('sensor_timeout', 0.3)       # s
         self.declare_parameter('contact_decay_tau', 1.0)    # s, wind estimate fades while touching a wall
         # Tunnel and clue 8 (see the module docstring)
@@ -222,6 +232,16 @@ class DroneWallRide(Node):
         self.declare_parameter('clue6_clear_distance', 0.6)  # m further after reading clue 5 (past its trees)
         self.declare_parameter('clue6_fallback_x', 2.5)     # m (dead-reckoned), step out here if clue 5 is missed
         self.declare_parameter('clue_wait', 5.0)            # s to wait for clue_finder before stopping the timer
+        # Stuck watchdog: no movement (0.15 m), climb (0.08 m) or turn (0.15 rad)
+        # for watchdog_time in a state that should be making progress -> RECOVER:
+        # move recover_distance away from whatever it is pushing against, then
+        # resume. After max_recoveries in one state, skip that state instead
+        # (except a wall ride, which always resumes)
+        self.declare_parameter('watchdog_time', 8.0)        # s
+        self.declare_parameter('recover_distance', 0.4)     # m
+        self.declare_parameter('recover_time', 4.0)         # s, longest a recovery move takes
+        self.declare_parameter('max_recoveries', 2)
+        self.declare_parameter('max_ride_recoveries', 4)    # on one wall, then treat the wall as done
 
         p = lambda name: self.get_parameter(name).value  # noqa: E731
         self.team_id = p('team_id')
@@ -232,6 +252,9 @@ class DroneWallRide(Node):
         self.wall_distance = float(p('wall_distance'))
         self.corner_distance = float(p('corner_distance'))
         self.cruise_speed = float(p('cruise_speed'))
+        self.fast_speed = max(self.cruise_speed, float(p('fast_speed')))
+        self.board_slow_time = float(p('board_slow_time'))
+        self.board_seen_time = None
         self.corner_gate = float(p('corner_gate'))
         self.max_wall_range = float(p('max_wall_range'))
         self.wall_search_speed = float(p('wall_search_speed'))
@@ -254,6 +277,7 @@ class DroneWallRide(Node):
         self.flow_max_vertical_speed = float(p('flow_max_vertical_speed'))
         self.flow_crop = float(p('flow_crop'))
         self.flow_min_texture = float(p('flow_min_texture'))
+        self.flow_min_isotropy = float(p('flow_min_isotropy'))
         self.sensor_timeout = float(p('sensor_timeout'))
         self.contact_decay_tau = float(p('contact_decay_tau'))
         self.tunnel_and_clue8 = bool(p('tunnel_and_clue8'))
@@ -283,6 +307,11 @@ class DroneWallRide(Node):
         self.clue6_clear_distance = float(p('clue6_clear_distance'))
         self.clue6_fallback_x = float(p('clue6_fallback_x'))
         self.clue_wait = float(p('clue_wait'))
+        self.watchdog_time = float(p('watchdog_time'))
+        self.recover_distance = float(p('recover_distance'))
+        self.recover_time = float(p('recover_time'))
+        self.max_recoveries = int(p('max_recoveries'))
+        self.max_ride_recoveries = int(p('max_ride_recoveries'))
 
         # Small integral limit: gravity is already cancelled by the plugin, the
         # integral only trims small biases (a big one winds up if the drone is
@@ -292,21 +321,21 @@ class DroneWallRide(Node):
         self.velocity_estimator = None
         self.bridge = CvBridge()
 
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 1)
+        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 1)
         self.score_pub = self.create_publisher(String, '/score_tracker', 1)
-        self.pose_pub = self.create_publisher(PoseStamped, '/drone/pose_estimate', 1)
-        self.state_pub = self.create_publisher(String, '/drone/state', 10)
-        self.status_pub = self.create_publisher(String, '/drone/status', 1)
+        self.pose_pub = self.create_publisher(PoseStamped, 'drone/pose_estimate', 1)
+        self.state_pub = self.create_publisher(String, 'drone/state', 10)
+        self.status_pub = self.create_publisher(String, 'drone/status', 1)
         self.create_subscription(Clock, '/clock', self.clock_callback, 1)
-        self.create_subscription(Imu, '/imu', self.imu_callback, 50)
-        self.create_subscription(Altimeter, '/altimeter', self.altimeter_callback, 1)
-        self.create_subscription(Image, '/down_depth', self.down_range_callback, 1)
-        self.create_subscription(Image, '/right_depth', self.right_range_callback, 1)
-        self.create_subscription(Image, '/front_depth', self.front_range_callback, 1)
-        self.create_subscription(Image, '/down_camera/image_raw', self.down_image_callback, 1)
-        self.create_subscription(Empty, '/drone/clues_flushed', self.clues_flushed_callback, 1)
-        self.create_subscription(PointStamped, '/drone/board_bearing', self.board_bearing_callback, 10)
-        self.create_subscription(String, '/drone/board_identified', self.board_identified_callback, 10)
+        self.create_subscription(Imu, 'imu', self.imu_callback, 50)
+        self.create_subscription(Altimeter, 'altimeter', self.altimeter_callback, 1)
+        self.create_subscription(Image, 'down_depth', self.down_range_callback, 1)
+        self.create_subscription(Image, 'right_depth', self.right_range_callback, 1)
+        self.create_subscription(Image, 'front_depth', self.front_range_callback, 1)
+        self.create_subscription(Image, 'down_camera/image_raw', self.down_image_callback, 1)
+        self.create_subscription(Empty, 'drone/clues_flushed', self.clues_flushed_callback, 1)
+        self.create_subscription(PointStamped, 'drone/board_bearing', self.board_bearing_callback, 10)
+        self.create_subscription(String, 'drone/board_identified', self.board_identified_callback, 10)
 
         self.sim_time = None
         self.state = 'WAIT_CLOCK'
@@ -336,6 +365,16 @@ class DroneWallRide(Node):
         # Wind / disturbance observer (level body frame, m/s^2)
         self.command_accel = (0.0, 0.0)
         self.disturbance = (0.0, 0.0)
+        # Stuck watchdog
+        self.control_accel_avg = (0.0, 0.0)  # controller's push (body frame, before the wind cancel), 1 s average
+        self.progress_anchor = None          # (x, y, altitude, yaw, time) of the last progress
+        self.recover_from = None             # state to resume after RECOVER
+        self.watched_states = WATCHED_STATES  # states the stuck watchdog checks (a subclass adds its own)
+        self.wall_on_left = False            # which side self.wall is measured on (the second drone: left)
+        self.recover_state_start = None      # that state's start time (its timeouts keep counting)
+        self.recover_point = None
+        self.recover_yaw = 0.0
+        self.recoveries = 0                  # recoveries in the current state
 
         self.stop_pending_since = None   # sim time DONE was reached, timer not stopped yet
         # Clue 6 visit: pending -> line (step out, fly east) -> hold -> done
@@ -348,6 +387,8 @@ class DroneWallRide(Node):
         # Tunnel and clue 8
         self.altitude_target = self.ride_altitude
         self.touch_since = None
+        self.stall_since = None
+        self.stall_front = None          # front range when the stall check last saw it shrink
         self.cross_start = None
         self.cross_since = None
         self.plateau_seen = False
@@ -355,6 +396,7 @@ class DroneWallRide(Node):
         self.off_edge_since = None
         self.legs = len(LEGS) if self.tunnel_and_clue8 else 2
         self.last_flow = None            # (forward, left) m/s, last optical-flow measurement used
+        self.flow_stats = [0, 0, 0, 0]      # down frames / flow measured / flow used / used across an edge only
 
         # Route progress
         self.leg = 0
@@ -454,6 +496,12 @@ class DroneWallRide(Node):
         if self.altitude is None or self.altitude < 0.15:
             # Still near the ground (ground contact is not wind)
             self.disturbance = tuple(0.9 * d for d in self.disturbance)
+            # ...and the liftoff jolt is not motion: integrated, it read as up to
+            # 1 m/s, and the takeoff then "corrected" it by flying into a wall.
+            # The optical flow isn't reliable this low either, so hold still.
+            self.vx = self.vy = 0.0
+            self.yaw = wrap(self.yaw + self.yaw_rate * dt)
+            return
         elif self.in_contact():
             # Touching a wall: the contact force is not wind, so don't learn from
             # it (that would push harder into the wall). Fade the estimate out
@@ -479,7 +527,8 @@ class DroneWallRide(Node):
             # Low: consecutive frames, centre crop (keeps the wall beside the drone out)
             self.velocity_estimator = GroundVelocityEstimator(
                 self.down_fov, frame.shape[1], smoothing=0.3,
-                crop_fraction=self.flow_crop, min_texture=self.flow_min_texture)
+                crop_fraction=self.flow_crop, min_texture=self.flow_min_texture,
+                min_isotropy=self.flow_min_isotropy)
             # High (over 1 m): the ground moves well under a pixel per frame, so use
             # the whole image at full resolution and a 0.4 s baseline
             self.high_velocity_estimator = GroundVelocityEstimator(
@@ -498,6 +547,10 @@ class DroneWallRide(Node):
             self.high_velocity_estimator.reset()
             estimator = self.velocity_estimator
         velocity = estimator.update(frame, stamp, h + DOWN_CAMERA_HEIGHT_OFFSET)
+        # Flow diagnostics: frames seen / with a measurement / used (logged by drone 2)
+        self.flow_stats[0] += 1
+        if velocity is not None:
+            self.flow_stats[1] += 1
         # Climbing zooms the image. High up, over the 0.4 s baseline a gentle climb
         # (0.2 m/s) zooms it only a few %, so the flow is still used then.
         max_vertical = 0.3 if h > 1.0 else self.flow_max_vertical_speed
@@ -505,10 +558,20 @@ class DroneWallRide(Node):
                 or abs(self.vertical_speed) > max_vertical):
             return
         forward, left = velocity
+        self.flow_stats[2] += 1
         self.last_flow = (forward, left)
         c, s = math.cos(self.yaw), math.sin(self.yaw)
-        self.vx += self.flow_gain * ((c * forward - s * left) - self.vx)
-        self.vy += self.flow_gain * ((s * forward + c * left) - self.vy)
+        if estimator.constraint is None:
+            self.vx += self.flow_gain * ((c * forward - s * left) - self.vx)
+            self.vy += self.flow_gain * ((s * forward + c * left) - self.vy)
+        else:
+            # Lone straight edge: correct only the velocity across it
+            cf, cl = estimator.constraint
+            ux, uy = c * cf - s * cl, s * cf + c * cl      # that direction, course frame
+            error = (forward * cf + left * cl) - (self.vx * ux + self.vy * uy)
+            self.vx += self.flow_gain * error * ux
+            self.vy += self.flow_gain * error * uy
+            self.flow_stats[3] += 1
 
     # ---------------------------------------------------------------- control
 
@@ -524,6 +587,8 @@ class DroneWallRide(Node):
             self.send_score(-1, 'NA')  # stop the timer
 
     def board_bearing_callback(self, msg):
+        # Any camera seeing a board (even far away) slows the ride so it gets read
+        self.board_seen_time = self.sim_time
         # Front camera: how big the board ahead looks (stops the clue 6 approach)
         if msg.header.frame_id == 'front':
             self.front_board_area = msg.point.y
@@ -557,7 +622,10 @@ class DroneWallRide(Node):
                     f'yaw {math.degrees(self.yaw):+.0f}  {wall}  {front}')
         self.status_pub.publish(msg)
 
-    def set_state(self, state):
+    def set_state(self, state, resume=False):
+        if state != 'RECOVER' and not resume:
+            self.recoveries = 0
+        self.progress_anchor = None
         self.state = state
         msg = String()
         msg.data = state
@@ -577,6 +645,10 @@ class DroneWallRide(Node):
         if norm > self.max_horizontal_accel:
             a_forward *= self.max_horizontal_accel / norm
             a_left *= self.max_horizontal_accel / norm
+        # Average push the controller asks for (the stuck watchdog backs away from it)
+        k = min(1.0, dt / 1.0)
+        self.control_accel_avg = (self.control_accel_avg[0] + k * (a_forward - self.control_accel_avg[0]),
+                                  self.control_accel_avg[1] + k * (a_left - self.control_accel_avg[1]))
         # Cancel the measured push (wind)
         a_forward -= self.disturbance[0]
         a_left -= self.disturbance[1]
@@ -584,7 +656,7 @@ class DroneWallRide(Node):
         rate = self.high_climb_rate if self.state == 'CLIMB' else self.max_climb_rate
         self.altitude_setpoint += clamp(self.altitude_target - self.altitude_setpoint, rate * dt)
         # High up, never get closer to the ground than agl_floor (downward range)
-        if (self.state in HIGH_STATES and self.fresh(self.range_time)
+        if (self.high() and self.fresh(self.range_time)
                 and self.range_height < self.agl_floor):
             self.altitude_setpoint = max(self.altitude_setpoint,
                                          self.altitude + self.agl_floor - self.range_height)
@@ -596,6 +668,10 @@ class DroneWallRide(Node):
         twist.linear.z = self.mass * a_up
         twist.angular.z = clamp(self.yaw_kp * wrap(yaw_target - self.yaw), self.max_yaw_rate)
         self.cmd_pub.publish(twist)
+
+    def high(self):
+        """Flying high (over the plateau, or recovering there)."""
+        return self.state in HIGH_STATES or (self.state == 'RECOVER' and self.recover_from in HIGH_STATES)
 
     def hold(self, point, yaw_target, dt):
         """Hold a dead-reckoned course-frame point."""
@@ -649,23 +725,41 @@ class DroneWallRide(Node):
             # always on the right, so drift right slowly until it's seen again
             a_left = -self.wall_kd * (v_left + self.wall_search_speed)
 
-        # Along the wall: cruise, then stop at the wall ahead once most of this
-        # wall's length has been covered
+        # Along the wall: fast on empty stretches, cruise speed while a clue board
+        # is in view (so every board gets plenty of readable frames), then stop
+        # at the wall ahead once most of this wall's length has been covered
         travelled = math.hypot(self.x - self.leg_start[0], self.y - self.leg_start[1])
-        speed = self.cruise_speed
+        board_near = (self.board_seen_time is not None
+                      and self.sim_time - self.board_seen_time < self.board_slow_time)
+        # Only fast once on the line (a leg starts close to the wall after the
+        # turn, and after clue 6 the drone is still moving back to it)
+        on_line = self.fresh(self.wall_time) and abs(self.wall[0] - wall_target) < 0.12
+        speed = self.fast_speed if on_line and not board_near else self.cruise_speed
         corner_seen = travelled > self.corner_gate * length and self.fresh(self.front_time)
         error = 0.0
         if corner_seen:
             error = self.front - self.corner_distance
-            speed = clamp(self.approach_gain * error, self.cruise_speed)
+            speed = clamp(self.approach_gain * error, speed)
         if self.leg == 2 and self.state == 'RIDE':
             # To the tunnel: slow down close to it, then push gently against it
             corner_seen = False
             near = self.fresh(self.front_time) and self.front < 0.6
             touching = self.fresh(self.front_time) and self.front <= 0.27   # within the 0.1 m near clip
-            if touching and self.touch_since is None:
+            # Riding into the middle of the tunnel mouth, the front sensor can
+            # look through the opening while the frame is against the arch: a
+            # stall is a touch too. Stalled = pushed forward but the front range
+            # hasn't shrunk for 1.5 s (the velocity estimate drifts while pinned,
+            # the range to whatever is ahead doesn't)
+            front_now = self.front if self.fresh(self.front_time) else None
+            if (front_now is None or travelled < 1.0 or self.touch_since is not None
+                    or self.stall_front is None or front_now < self.stall_front - 0.03):
+                self.stall_front = front_now
+                self.stall_since = self.sim_time
+            stalled = self.stall_since is not None and self.sim_time - self.stall_since >= 1.5
+            if (touching or stalled) and self.touch_since is None:
                 self.touch_since = self.sim_time
-                self.get_logger().info('Tunnel: reached it, pushing gently')
+                self.get_logger().info('Tunnel: reached it' + (' (stalled against it)' if stalled and not touching else '')
+                                       + ', pushing gently')
             if self.touch_since is not None:
                 a_forward = 0.3                      # ~6 N forward, keeps the frame against the arch
             else:
@@ -712,7 +806,8 @@ class DroneWallRide(Node):
                 if self.fresh(self.wall_time) else 'lost')
         front = f'{self.front:.2f} m' if self.fresh(self.front_time) else 'none'
         self.get_logger().info(
-            f'{name}: travelled {travelled:.2f} m, v fwd {v_forward:+.2f} left {v_left:+.2f}, '
+            f'{name}: travelled {travelled:.2f} m, v fwd {v_forward:+.2f} (target {speed:.2f}'
+            f'{", board in view" if board_near else ""}) left {v_left:+.2f}, '
             f'wall {wall}, front {front}, wind push {self.disturbance[0]:+.2f} '
             f'{self.disturbance[1]:+.2f} m/s^2, IMU gaps {self.imu_gaps}', throttle_duration_sec=1.0)
 
@@ -748,9 +843,8 @@ class DroneWallRide(Node):
             # away from it, while climbing (a gust can push the drone onto it)
             v_forward, v_left = self.body_velocity()
             self.publish(self.speed_kp * (0.1 - v_forward), -self.position_kd * v_left, START[2], dt)
-            # Hover 2 s at the top still facing north: clue 1 faces the spawn, so
-            # the front camera gets a few frames of it before the turn
-            if self.settled(abs(self.altitude - self.altitude_target) < 0.03, 2.0) or elapsed > 12.0:
+            # (Clue 1 is the second drone's, so no hover here for the front camera)
+            if self.settled(abs(self.altitude - self.altitude_target) < 0.03, 0.5) or elapsed > 12.0:
                 self.hold_point = (self.x, self.y)
                 if self.test_climb:
                     self.altitude_target = self.cruise_altitude
@@ -771,35 +865,11 @@ class DroneWallRide(Node):
             else:
                 self.hold(self.hold_point, heading, dt)
             if self.settled(abs(wrap(heading - self.yaw)) < 0.05, 0.5) or elapsed > 10.0:
-                self.leg_start = (self.x, self.y)
-                self.set_state('RIDE')
-                self.get_logger().info(f'Riding the {LEGS[self.leg][0]}')
+                self.enter_ride()
         elif self.state == 'RIDE':
             if self.ride(dt):
-                self.hold_point = (self.x, self.y)
-                self.get_logger().info(f'Corner at the end of the {LEGS[self.leg][0]} '
-                                       f'(travelled {math.hypot(self.x - self.leg_start[0], self.y - self.leg_start[1]):.2f} m)')
-                if self.leg == 2:
-                    # Touched the tunnel's east face: a known point, so reset x and y
-                    wall = self.wall[0] if self.fresh(self.wall_time) else self.tunnel_wall_distance
-                    self.x, self.y = self.tunnel_touch_x, 2.75 - wall
-                    self.vx = self.vy = 0.0
-                    self.get_logger().info(f'Touched the tunnel (bonus +5) - position reset to '
-                                           f'x {self.x:+.2f} y {self.y:+.2f}')
-                    # Back off into open air before climbing: 0.5 m east (off the
-                    # tunnel) and 0.5 m south (off the north wall) - pressed against a
-                    # wall, its friction can stall the climb
-                    self.hold_point = (self.x + 0.5, self.y - 0.5)
-                    self.set_state('BACK_OFF')
-                elif self.leg + 1 < self.legs:
-                    self.leg += 1
-                    self.set_state('TURN')
-                else:
-                    # clue_finder reads and submits the boards still in view, then
-                    # says so on /drone/clues_flushed and the timer is stopped
-                    self.stop_pending_since = self.sim_time
-                    self.set_state('DONE')
-        if self.state in HIGH_STATES or self.state == 'BACK_OFF':
+                self.finish_leg()
+        if self.high() or self.state == 'BACK_OFF':
             flow = 'none' if self.last_flow is None else f'{self.last_flow[0]:+.2f} {self.last_flow[1]:+.2f}'
             rng = f'{self.range_height:.2f}' if self.fresh(self.range_time) else '-'
             self.get_logger().info(
@@ -807,20 +877,19 @@ class DroneWallRide(Node):
                 f'yaw {math.degrees(self.yaw):+.0f}, alt {self.altitude:.2f} vz {self.vertical_speed:+.2f}, '
                 f'range {rng}, flow fwd/left {flow}, wind {self.disturbance[0]:+.2f} '
                 f'{self.disturbance[1]:+.2f}', throttle_duration_sec=1.0)
+        # (RIDE can switch to BACK_OFF earlier in this same tick, so the
+        # high-state timeouts use the time since their own state began)
+        elapsed = self.sim_time - self.state_start_time
         if self.state == 'BACK_OFF':
             self.hold(self.hold_point, math.pi, dt)
             if self.settled(math.hypot(self.hold_point[0] - self.x, self.hold_point[1] - self.y) < 0.08,
                             0.5) or elapsed > 6.0:
-                self.hold_point = (self.x, self.y)
-                self.altitude_target = self.cruise_altitude
-                self.set_state('CLIMB')
+                self.enter_climb()
         elif self.state == 'CLIMB':
             # Straight up in open air, in front of the tunnel
             self.hold(self.hold_point, math.pi, dt)
             if self.settled(abs(self.altitude - self.cruise_altitude) < 0.05, 0.5) or elapsed > 15.0:
-                self.cross_start = (self.x, self.y)
-                self.plateau_seen = False
-                self.set_state('CROSS')
+                self.enter_cross()
         elif self.state == 'CROSS':
             # A point moving at cross_speed from the climb point to the plateau
             sx, sy = self.cross_start
@@ -835,8 +904,7 @@ class DroneWallRide(Node):
             if k >= 1.0 and math.hypot(tx - self.x, ty - self.y) < 0.15:
                 if not self.plateau_seen:
                     self.get_logger().warn('Plateau not confirmed by the range sensor - looking for clue 8 anyway')
-                self.plateau_since = self.off_edge_since = None
-                self.set_state('CLUE8')
+                self.enter_clue8()
         elif self.state == 'CLUE8':
             # West across the plateau, centring clue 8 in the front camera
             v_forward, v_left = self.body_velocity()
@@ -879,6 +947,11 @@ class DroneWallRide(Node):
                 # says so on /drone/clues_flushed and the timer is stopped
                 self.stop_pending_since = self.sim_time
                 self.set_state('DONE')
+        elif self.state == 'RECOVER':
+            self.hold(self.recover_point, self.recover_yaw, dt)
+            reached = math.hypot(self.recover_point[0] - self.x, self.recover_point[1] - self.y) < 0.1
+            if self.settled(reached, 0.5) or elapsed > self.recover_time:
+                self.resume()
         elif self.state == 'DONE':
             # Don't wait for clue_finder for ever (it may not be running)
             if (self.stop_pending_since is not None
@@ -889,6 +962,171 @@ class DroneWallRide(Node):
                 self.hold(self.hold_point, math.pi, dt)   # hover where clue 8 was read
             else:
                 self.ride(dt)   # keep riding the last wall's corner: holds both wall distances
+        self.watchdog()
+
+    # ---------------------------------------------------------------- transitions
+
+    def finish_leg(self):
+        """End of a wall: corner (reset the position from the two walls) or tunnel."""
+        self.hold_point = (self.x, self.y)
+        self.get_logger().info(f'Corner at the end of the {LEGS[self.leg][0]} '
+                               f'(travelled {math.hypot(self.x - self.leg_start[0], self.y - self.leg_start[1]):.2f} m)')
+        # (front < 1 m: really in the corner, not a watchdog skip mid-wall)
+        walls_seen = (self.fresh(self.wall_time) and self.fresh(self.front_time)
+                      and self.front < 1.0 and self.wall[0] < self.max_wall_range)
+        if self.leg in (0, 1) and walls_seen:
+            # In a corner both walls are measured: a known point. (Dead reckoning
+            # is typically 1.5 - 3 m off by here; this is within ~2 cm.)
+            if self.leg == 0:   # facing east: east wall ahead, south wall on the right
+                x, y = EAST_WALL_X - self.front, SOUTH_WALL_Y + self.wall[0]
+            else:               # facing north: north wall ahead, east wall on the right
+                x, y = EAST_WALL_X - self.wall[0], NORTH_WALL_Y - self.front
+            self.get_logger().info(f'Corner: position reset from the walls to x {x:+.2f} y {y:+.2f} '
+                                   f'(dead reckoning was {self.x - x:+.2f} {self.y - y:+.2f} off)')
+            self.x, self.y = x, y
+            self.hold_point = (x, y)
+        if self.leg == 2:
+            # Touched the tunnel's east face: a known point, so reset x and y
+            wall = self.wall[0] if self.fresh(self.wall_time) else self.tunnel_wall_distance
+            self.x, self.y = self.tunnel_touch_x, NORTH_WALL_Y - wall
+            self.vx = self.vy = 0.0
+            self.get_logger().info(f'Touched the tunnel (bonus +5) - position reset to '
+                                   f'x {self.x:+.2f} y {self.y:+.2f}')
+            # Back off into open air before climbing: 0.5 m east (off the
+            # tunnel) and 0.5 m south (off the north wall) - pressed against a
+            # wall, its friction can stall the climb
+            self.hold_point = (self.x + 0.5, self.y - 0.5)
+            self.set_state('BACK_OFF')
+        elif self.leg + 1 < self.legs:
+            self.leg += 1
+            self.set_state('TURN')
+        else:
+            # clue_finder reads and submits the boards still in view, then
+            # says so on /drone/clues_flushed and the timer is stopped
+            self.stop_pending_since = self.sim_time
+            self.set_state('DONE')
+
+    def enter_climb(self):
+        self.hold_point = (self.x, self.y)
+        self.altitude_target = self.cruise_altitude
+        self.set_state('CLIMB')
+
+    def enter_cross(self):
+        self.cross_start = (self.x, self.y)
+        self.plateau_seen = False
+        self.set_state('CROSS')
+
+    def enter_clue8(self):
+        self.plateau_since = self.off_edge_since = None
+        self.set_state('CLUE8')
+
+    def enter_ride(self):
+        self.leg_start = (self.x, self.y)
+        self.set_state('RIDE')
+        self.get_logger().info(f'Riding the {LEGS[self.leg][0]}')
+
+    # ---------------------------------------------------------------- stuck watchdog
+
+    def watchdog(self):
+        """Recover when a state that should make progress hasn't for watchdog_time."""
+        if self.state not in self.watched_states or self.altitude is None:
+            self.progress_anchor = None
+            return
+        front = self.front if self.fresh(self.front_time) else None
+        wall = self.wall[0] if self.fresh(self.wall_time) else None
+        now = (self.x, self.y, self.altitude, self.yaw, self.sim_time, front, wall)
+        a = self.progress_anchor
+        # Pinned against something the position estimate drifts and would look
+        # like progress, so: climbing states only count height, and the wall ride
+        # counts the measured ranges (to the wall ahead and beside) and yaw
+        moved = False
+        if a is not None and self.state == 'RIDE':
+            moved = (abs(wrap(now[3] - a[3])) > 0.15
+                     or (front is not None and a[5] is not None and abs(front - a[5]) > 0.15)
+                     or (wall is not None and a[6] is not None and abs(wall - a[6]) > 0.15)
+                     or (front is None and math.hypot(now[0] - a[0], now[1] - a[1]) > 0.15))
+        elif a is not None and self.state not in ('TAKEOFF', 'CLIMB'):
+            moved = (math.hypot(now[0] - a[0], now[1] - a[1]) > 0.15
+                     or abs(wrap(now[3] - a[3])) > 0.15)
+        if a is None or moved or abs(now[2] - a[2]) > 0.08:
+            self.progress_anchor = now
+            return
+        if self.sim_time - a[4] < self.watchdog_time:
+            return
+        stuck = self.state
+        limit = self.max_ride_recoveries if stuck == 'RIDE' else self.max_recoveries
+        if self.recoveries >= limit:
+            self.get_logger().warn(f'Watchdog: still stuck in {stuck} after {self.recoveries} recoveries '
+                                   f'- skipping to the next step')
+            self.skip(stuck)
+            return
+        # Back away from what it's pushing against: the opposite of the
+        # controller's average push, or away from a wall the range sensors see
+        push_f, push_l = self.control_accel_avg
+        wall_beside = self.fresh(self.wall_time) and self.wall[0] < 0.35
+        wall_ahead = self.fresh(self.front_time) and self.front < 0.45
+        c, s = math.cos(self.yaw), math.sin(self.yaw)
+        norm = math.hypot(push_f, push_l)
+        if norm > 0.2:
+            esc_f, esc_l = -push_f / norm, -push_l / norm
+        else:
+            # No clear push (e.g. pinned by the wind at liftoff): head for the
+            # middle of the arena - every wall is on its edge
+            to_x, to_y = -self.x, -self.y
+            n = math.hypot(to_x, to_y) or 1.0
+            esc_f, esc_l = (c * to_x + s * to_y) / n, (-s * to_x + c * to_y) / n
+        # Never escape into a wall that is right there
+        if wall_beside:
+            esc_l = min(esc_l, -0.5) if self.wall_on_left else max(esc_l, 0.5)
+        if wall_ahead:
+            esc_f = min(esc_f, -0.5)
+        norm = math.hypot(esc_f, esc_l)
+        esc_f, esc_l = esc_f / norm, esc_l / norm
+        ex, ey = c * esc_f - s * esc_l, s * esc_f + c * esc_l
+        self.recover_point = (self.x + self.recover_distance * ex, self.y + self.recover_distance * ey)
+        self.recover_yaw = self.yaw
+        self.recover_from = stuck
+        self.recover_state_start = self.state_start_time
+        # Against an obstacle the wind cancel winds up (it reads the wall's push
+        # as wind and pushes harder into it): start the recovery from zero
+        self.disturbance = (0.0, 0.0)
+        self.recoveries += 1
+        self.get_logger().warn(f'Watchdog: no progress in {stuck} for {self.watchdog_time:.0f} s '
+                               f'(push fwd {push_f:+.2f} left {push_l:+.2f} m/s^2) - backing off '
+                               f'{self.recover_distance:.1f} m (recovery {self.recoveries})')
+        self.set_state('RECOVER')
+
+    def resume(self):
+        """Back to the state that got stuck, from the new position."""
+        state = self.recover_from
+        self.recover_from = None
+        self.get_logger().info(f'Watchdog: recovered, resuming {state}')
+        if state == 'CROSS':
+            self.cross_start = (self.x, self.y)
+        elif state in ('TURN', 'CLIMB'):
+            self.hold_point = (self.x, self.y)
+        self.set_state(state, resume=True)
+        # Keep the state's own clock: its timeouts (tunnel 40 s, clue 8 30 s,
+        # turn/climb fallbacks) still fire, so stuck -> recover -> resume can't loop
+        self.state_start_time = self.recover_state_start
+
+    def skip(self, state):
+        """Give up on a stuck state: carry on as if it had finished."""
+        if state == 'TAKEOFF':
+            self.hold_point = (self.x, self.y)
+            self.set_state('TURN')
+        elif state == 'TURN':
+            self.enter_ride()
+        elif state == 'BACK_OFF':
+            self.enter_climb()
+        elif state == 'CLIMB':
+            self.enter_cross()
+        elif state == 'CROSS':
+            self.enter_clue8()
+        elif state == 'CLUE8':
+            self.set_state('CLUE8_HOLD')
+        elif state == 'RIDE':
+            self.finish_leg()   # this wall is done (a stuck tunnel leg goes on to the climb)
 
 
 def main(args=None):
