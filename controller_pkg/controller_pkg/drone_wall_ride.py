@@ -16,11 +16,15 @@ Route (the wall is always on the drone's right):
      again, close up.
   5. up and over to clue 8: back off into open air, climb gently (0.2 m/s;
      optical flow over a 0.4 s baseline keeps working high up) to 2.3 m (altimeter; the
-     plateau is 1.82 m), fly to the middle of the plateau facing west - the
-     downward range sensor confirms it (the ground jumps up to ~0.5 m below)
-     and keeps at least 0.3 m of clearance - then creep west, steering by
-     clue 8's direction in the front camera, until it's big enough to read,
-     and hold there
+     plateau is 1.82 m). From 1.0 m up (clear of the tunnel) it climbs and
+     flies toward the plateau at once, staying east of its slope until
+     nearly at 2.3 m. The cross ends once the downward range sensor has had
+     the plateau under the drone for 1 s (the ground jumps up to ~0.5 m
+     below; dead reckoning falls ~0.4 m short here), and that sensor keeps
+     at least 0.3 m of clearance. Then west, steering by clue 8's direction
+     in the front camera (holding a point that moves at 0.3 m/s while the
+     board is small, 0.15 m/s once it covers 2% of the image) until it's
+     big enough to read, and hold there
   6. done: hover; the timer is stopped once clue_finder has submitted
 
 Clue 6 faces west, 0.64 m in from the south wall (y = -1.71, x random in
@@ -169,7 +173,9 @@ class DroneWallRide(Node):
         self.declare_parameter('corner_distance', 0.4)      # m, drone centre to the wall ahead at a corner
         self.declare_parameter('cruise_speed', 0.35)        # m/s along the walls while a clue board is in view
         self.declare_parameter('fast_speed', 0.8)           # m/s along the walls with no board in view
-        self.declare_parameter('board_slow_time', 1.5)      # s at cruise_speed after any camera last saw a board
+        # (clue_finder sees a board in view ~5 times a second, and its detections
+        # rarely drop out for more than 0.5 s: long enough to bridge those)
+        self.declare_parameter('board_slow_time', 0.6)      # s at cruise_speed after any camera last saw a board
         self.declare_parameter('corner_gate', 0.6)          # fraction of a wall's length before the wall ahead counts
         self.declare_parameter('max_wall_range', 1.5)       # m, right range readings beyond this are ignored
         self.declare_parameter('wall_search_speed', 0.15)   # m/s sideways toward the wall when it's lost
@@ -215,9 +221,24 @@ class DroneWallRide(Node):
         self.declare_parameter('plateau_x', 1.7)            # m, plateau (1.82 m high) spans x 1.0 - 2.5
         self.declare_parameter('plateau_y', 1.2)
         self.declare_parameter('cross_speed', 0.3)          # m/s
+        # Climb and cross at once: the cross starts at this height (clear of the
+        # tunnel, 0.62 m, and high enough for the optical flow to work while
+        # climbing) and the climb carries on. Until within 0.1 m of
+        # cruise_altitude the drone stays east of plateau_edge_x (the plateau's
+        # east slope starts at ~2.4). cross_climb_altitude >= cruise_altitude
+        # = climb first, then cross
+        self.declare_parameter('cross_climb_altitude', 1.0)  # m above the start
+        self.declare_parameter('plateau_edge_x', 2.8)       # m
         self.declare_parameter('agl_floor', 0.3)            # m, minimum ground clearance when high up
         self.declare_parameter('plateau_range', 0.7)        # m, ground closer than this below = over the plateau
-        self.declare_parameter('clue8_speed', 0.15)         # m/s west across the plateau
+        # The cross ends once the plateau has been under the drone this long (the
+        # dead-reckoned cross falls short; it carries on west up to cross_overshoot)
+        self.declare_parameter('plateau_confirm_time', 1.0)  # s
+        self.declare_parameter('cross_overshoot', 1.0)      # m past the plateau point
+        self.declare_parameter('clue8_speed', 0.15)         # m/s west across the plateau, close to clue 8
+        self.declare_parameter('clue8_far_speed', 0.3)      # m/s while it covers less than clue8_near_area
+        self.declare_parameter('clue8_near_area', 0.02)     # board fraction of the front image
+        self.declare_parameter('clue8_lead', 0.4)           # m, furthest the moving point gets ahead of the drone
         self.declare_parameter('clue8_stop_area', 0.03)     # board fraction of the front image to stop at
         self.declare_parameter('clue8_dwell', 3.0)          # s held in front of it
         self.declare_parameter('clue8_timeout', 30.0)       # s before giving up
@@ -291,9 +312,20 @@ class DroneWallRide(Node):
         self.high_climb_rate = float(p('high_climb_rate'))
         self.plateau = (float(p('plateau_x')), float(p('plateau_y')))
         self.cross_speed = float(p('cross_speed'))
+        self.cross_climb_altitude = min(float(p('cross_climb_altitude')), self.cruise_altitude - 0.05)
+        self.plateau_edge_x = float(p('plateau_edge_x'))
+        self.plateau_confirm_time = float(p('plateau_confirm_time'))
+        self.cross_overshoot = float(p('cross_overshoot'))
+        self.plateau_under_since = None
+        self.front_blocked = False
+        self.cross_k = 0.0
         self.agl_floor = float(p('agl_floor'))
         self.plateau_range = float(p('plateau_range'))
         self.clue8_speed = float(p('clue8_speed'))
+        self.clue8_far_speed = float(p('clue8_far_speed'))
+        self.clue8_near_area = float(p('clue8_near_area'))
+        self.clue8_lead = float(p('clue8_lead'))
+        self.clue8_point = None
         self.clue8_stop_area = float(p('clue8_stop_area'))
         self.clue8_dwell = float(p('clue8_dwell'))
         self.clue8_timeout = float(p('clue8_timeout'))
@@ -460,13 +492,20 @@ class DroneWallRide(Node):
         w = depth.shape[1]
         patch = depth[: max(1, depth.shape[0] // 2), w // 4: w - w // 4]
         valid = patch[np.isfinite(patch) & (patch > 0.1)]
-        if np.mean(np.isneginf(patch)) > 0.25:
-            # Closer than the 0.1 m near clip (reads as -inf), not "nothing ahead"
+        if np.mean(np.isneginf(patch)) > 0.25 or (self.front_blocked and not valid.size):
+            # Closer than the 0.1 m near clip (reads as -inf), not "nothing ahead".
+            # Pressed against a wall the sensor (ahead of the frame) can end up
+            # inside it and see nothing at all: after a close reading, "nothing"
+            # is still "touching" until a real reading comes back
             self.front = 0.1 + FRONT_RANGE_X
             self.front_time = self.sim_time
+            self.front_blocked = True
         elif valid.size:
             self.front = float(np.median(valid)) + FRONT_RANGE_X
             self.front_time = self.sim_time
+            self.front_blocked = self.front < 0.35
+        else:
+            self.front_blocked = False
 
     def in_contact(self, margin=0.22):
         """A range sensor says the drone's frame (0.15 m half width) is at a wall."""
@@ -653,7 +692,7 @@ class DroneWallRide(Node):
         a_forward -= self.disturbance[0]
         a_left -= self.disturbance[1]
         self.command_accel = (a_forward, a_left)
-        rate = self.high_climb_rate if self.state == 'CLIMB' else self.max_climb_rate
+        rate = self.high_climb_rate if self.state in ('CLIMB', 'CROSS') else self.max_climb_rate
         self.altitude_setpoint += clamp(self.altitude_target - self.altitude_setpoint, rate * dt)
         # High up, never get closer to the ground than agl_floor (downward range)
         if (self.high() and self.fresh(self.range_time)
@@ -886,33 +925,60 @@ class DroneWallRide(Node):
                             0.5) or elapsed > 6.0:
                 self.enter_climb()
         elif self.state == 'CLIMB':
-            # Straight up in open air, in front of the tunnel
+            # Straight up in open air, in front of the tunnel, until high enough
+            # to start the cross (which climbs the rest of the way)
             self.hold(self.hold_point, math.pi, dt)
-            if self.settled(abs(self.altitude - self.cruise_altitude) < 0.05, 0.5) or elapsed > 15.0:
+            if self.settled(self.altitude >= self.cross_climb_altitude, 0.3) or elapsed > 15.0:
                 self.enter_cross()
         elif self.state == 'CROSS':
-            # A point moving at cross_speed from the climb point to the plateau
+            # A point moving at cross_speed from the climb point to the plateau,
+            # held east of the plateau's slope until (nearly) at cruise height
             sx, sy = self.cross_start
             tx, ty = self.plateau
             length = math.hypot(tx - sx, ty - sy)
-            k = min(1.0, self.cross_speed * elapsed / max(length, 1e-6))
+            k_max = 1.0 + self.cross_overshoot / max(length, 1e-6)
+            if self.altitude < self.cruise_altitude - 0.1 and sx > self.plateau_edge_x > tx:
+                k_max = (sx - self.plateau_edge_x) / (sx - tx)
+            step = self.cross_speed * dt / max(length, 1e-6)
+            self.cross_k = max(self.cross_k, min(k_max, self.cross_k + step))
+            k = self.cross_k
             self.hold((sx + k * (tx - sx), sy + k * (ty - sy)), math.pi, dt)
-            if (not self.plateau_seen and self.fresh(self.range_time)
-                    and self.range_height < self.plateau_range):
+            if self.fresh(self.range_time):
+                if self.range_height < self.plateau_range:
+                    if self.plateau_under_since is None:
+                        self.plateau_under_since = self.sim_time
+                else:
+                    self.plateau_under_since = None
+            on_plateau = (self.plateau_under_since is not None
+                          and self.sim_time - self.plateau_under_since >= self.plateau_confirm_time)
+            if on_plateau and not self.plateau_seen:
                 self.plateau_seen = True
                 self.get_logger().info(f'Over the plateau (ground {self.range_height:.2f} m below)')
-            if k >= 1.0 and math.hypot(tx - self.x, ty - self.y) < 0.15:
-                if not self.plateau_seen:
+            if k >= 1.0 and (on_plateau or k >= k_max):
+                if not on_plateau:
                     self.get_logger().warn('Plateau not confirmed by the range sensor - looking for clue 8 anyway')
+                elif math.hypot(tx - self.x, ty - self.y) > 0.15:
+                    self.get_logger().info(f'Cross: plateau reached {math.hypot(tx - self.x, ty - self.y):.2f} m '
+                                           f'past the dead-reckoned plateau point')
                 self.enter_clue8()
         elif self.state == 'CLUE8':
-            # West across the plateau, centring clue 8 in the front camera
-            v_forward, v_left = self.body_velocity()
+            # West across the plateau, centring clue 8 in the front camera: hold a
+            # point that moves that way (a plain speed loop at these low speeds
+            # has too little push against the gusts, and stalls for seconds at
+            # the plateau's edge). Quicker while the board is still small
             seen = self.front_board_time is not None and self.sim_time - self.front_board_time < 1.0
-            v_left_target = clamp(-0.8 * self.front_board_bearing, 0.15) if seen else 0.0
-            a_forward = self.speed_kp * (self.clue8_speed - v_forward)
-            a_left = self.speed_kp * (v_left_target - v_left)
-            self.publish(a_forward, a_left, math.pi, dt)
+            near = seen and self.front_board_area >= self.clue8_near_area
+            v_forward = self.clue8_speed if near else self.clue8_far_speed
+            v_left = clamp(-0.8 * self.front_board_bearing, 0.15) if seen else 0.0
+            c, s = math.cos(self.yaw), math.sin(self.yaw)
+            px = self.clue8_point[0] + (c * v_forward - s * v_left) * dt
+            py = self.clue8_point[1] + (s * v_forward + c * v_left) * dt
+            lead = math.hypot(px - self.x, py - self.y)
+            if lead > self.clue8_lead:   # never far ahead of the drone (no wind-up)
+                px = self.x + (px - self.x) * self.clue8_lead / lead
+                py = self.y + (py - self.y) * self.clue8_lead / lead
+            self.clue8_point = (px, py)
+            self.hold(self.clue8_point, math.pi, dt)
             # The plateau's west edge (clue 8 stands near it): over the plateau for
             # 3 s, then the ground drops away for 0.5 s. (At an edge the range
             # sensor flickers between the two heights, so neither is instant.)
@@ -1013,11 +1079,14 @@ class DroneWallRide(Node):
 
     def enter_cross(self):
         self.cross_start = (self.x, self.y)
+        self.cross_k = 0.0
         self.plateau_seen = False
+        self.plateau_under_since = None
         self.set_state('CROSS')
 
     def enter_clue8(self):
         self.plateau_since = self.off_edge_since = None
+        self.clue8_point = (self.x, self.y)
         self.set_state('CLUE8')
 
     def enter_ride(self):
@@ -1103,6 +1172,9 @@ class DroneWallRide(Node):
         self.get_logger().info(f'Watchdog: recovered, resuming {state}')
         if state == 'CROSS':
             self.cross_start = (self.x, self.y)
+            self.cross_k = 0.0
+        elif state == 'CLUE8':
+            self.clue8_point = (self.x, self.y)
         elif state in ('TURN', 'CLIMB'):
             self.hold_point = (self.x, self.y)
         self.set_state(state, resume=True)

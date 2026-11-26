@@ -246,6 +246,9 @@ NPCs.
 
 ## Notes
 
+- Drone 1's speed optimizations, with the test results behind each, are logged in
+  [OPTIMIZATIONS.md](OPTIMIZATIONS.md).
+
 - Wind is enabled on the drone chassis, as the rules require. The drone plugin's own
   `linear_drag` is 0 because the wind plugin already applies air drag; set it to 1.0 if you
   ever turn wind off, or the drone will never slow down.
