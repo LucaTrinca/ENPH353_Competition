@@ -1,0 +1,325 @@
+<?xml version="1.0" ?>
+<sdf version="1.8">
+  <world name="fast_world">
+    <!-- Set simulation Physics parameters -->
+    <physics name="1ms" type="ignored">
+      <max_step_size>0.005</max_step_size>
+      <real_time_update_rate>200</real_time_update_rate>
+      <real_time_factor>1.0</real_time_factor>
+    </physics>
+
+    <plugin
+      filename="gz-sim-physics-system"
+      name="gz::sim::systems::Physics">
+        <engine>
+          <filename>gz-physics-dartsim-plugin</filename>
+        </engine>
+    </plugin>
+    <plugin
+      filename="gz-sim-user-commands-system"
+      name="gz::sim::systems::UserCommands">
+    </plugin>
+
+    <!-- Enables rendering of the scene-->
+    <plugin
+      filename="gz-sim-scene-broadcaster-system"
+      name="gz::sim::systems::SceneBroadcaster">
+    </plugin>
+
+    <!-- Enabling camera feeds globally (i.e. for robot cameras)-->
+    <plugin
+      filename="gz-sim-sensors-system"
+      name="gz::sim::systems::Sensors">
+      <render_engine>ogre</render_engine>
+    </plugin>
+
+    <!-- THE KEY SECTION FOR SHADOWS -->
+    <scene> 
+      <ambient>0.4 0.4 0.4 1</ambient>
+      <background>0.7 0.7 0.7 1</background>
+      <shadows>false</shadows>
+    </scene>
+
+    <!-- Wind plugin -->
+    <plugin
+      filename="gz-sim-wind-effects-system"
+      name="gz::sim::systems::WindEffects">
+      <force_approximation_scaling_factor>1</force_approximation_scaling_factor>
+      <horizontal>
+        <magnitude>
+          <time_for_rise>0.01</time_for_rise>
+          <sin>
+            <amplitude_percent>0.8</amplitude_percent>
+            <period>4.72</period>
+          </sin>
+        </magnitude>
+        <direction>
+          <time_for_rise>0.01</time_for_rise> <!-- Force response dampening-->
+          <sin>
+            <amplitude>137</amplitude> <!-- deviation from cardinal wind direction in degrees-->
+            <period>10</period>
+          </sin>
+        </direction>
+      </horizontal>
+    </plugin>
+
+    <wind>
+      <linear_velocity>0 1 0</linear_velocity> <!-- cardinal wind direction -->
+    </wind>
+
+    <plugin
+      filename="libResetSimPlugin.so"
+      name="reset_plugin::ResetSimPlugin">
+    </plugin>
+
+    <light type="directional" name="sun">
+      <cast_shadows>false</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- WALLS START -->
+    <include>
+    	<uri>model://models/wall_short</uri>
+    	<name>north_wall</name>
+    	<pose>6 0 0.25 1.57 0 -1.57</pose>
+    	<static>true</static>
+    </include>
+
+    <include>
+    	<uri>model://models/wall_short</uri>
+    	<name>south_wall</name>
+    	<pose>-6 0 0.25 1.57 0 1.57</pose>
+    	<static>true</static>
+    </include>
+
+    <include>
+    	<uri>model://models/wall_long</uri>
+    	<name>east_wall</name>
+    	<pose>0 -2.75 0.25 1.57 0 3.14</pose>
+    	<static>true</static>
+    </include>
+
+    <include>
+    	<uri>model://models/wall_long</uri>
+    	<name>west_wall</name>
+    	<pose>0 2.75 0.25 1.57 0 0</pose>
+    	<static>true</static>
+    </include>
+
+    <!-- WALLS END -->
+
+    <!-- TERRAIN START -->
+
+    <include>
+    	<uri>model://models/terrain</uri>
+    	<name>base_map</name>
+    	<pose>0 0 0 0 0 1.57</pose>
+    	<static>true</static>
+    </include>
+
+    <!-- TERRAIN END -->
+
+    <!-- CAR START -->
+
+    <include>
+      <uri>model://models/muscle_car</uri>
+      <static>true</static>
+      <pose>4.14 2.56 0 0 0 -1.57</pose>
+    </include>
+
+    <!-- CAR END -->
+
+    <!-- NPC START -->
+
+    <include>
+    	<uri>model://models/truck_npc</uri>
+    	<name>truck_npc</name>
+    	<pose>-1.0 0.5 0.1 0 0 3.14</pose>
+    	<static>false</static>
+    </include>
+
+    <include>
+    	<uri>model://models/baby_yoda_npc</uri>
+    	<name>baby_yoda_npc</name>
+    	<pose>4.0 -0.5 0.1 0 0 0</pose>
+    	<static>false</static>
+    </include>
+
+    <include>
+    	<uri>model://models/pedestrian_npc</uri>
+    	<name>pedestrian_npc</name>
+    	<pose>-4 0 0.3 0 0 0</pose>
+    	<static>false</static>
+    </include>
+
+    <!-- NPC END -->
+
+    <!-- WATER START -->
+
+    <include>
+      <uri>model://models/water</uri>
+      <name>water</name>
+      <static>true</static>
+      <pose>1.56 -1.64 -0.15 0 0 0</pose>
+    </include>
+
+    <!-- WATER END -->
+
+    <!-- TUNNEL START -->
+
+    <include>
+      <uri>model://models/tunnel</uri>
+      <name>tunnel</name>
+      <static>true</static>
+      <pose>3.2 2.3 0.29 0 0.46 0</pose>
+    </include>
+
+    <!-- TUNNEL END -->
+
+    <!-- WIND SOCK -->
+
+    <include>
+      <uri>model://models/wind_sock</uri>
+      <name>wind_sock</name>
+      <pose>0.9 1.2 0.3 0 0 0</pose>
+    </include>
+
+    <!-- TREES START -->
+
+    <include>
+      <uri>model://models/tree_poly</uri>
+      <name>tree_poly</name>
+      <static>true</static>
+      <pose>-2.5 1.5 0 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_01</name>
+      <static>true</static>
+      <pose>-2.8 -0.4 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_02</name>
+      <static>true</static>
+      <pose>-3 -1 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_03</name>
+      <static>true</static>
+      <pose>-3 -2 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_04</name>
+      <static>true</static>
+      <pose>-2.8 -2.5 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_05</name>
+      <static>true</static>
+      <pose>-1 -1 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_06</name>
+      <static>true</static>
+      <pose>-2 -1 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_07</name>
+      <static>true</static>
+      <pose>-2 -1.8 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_08</name>
+      <static>true</static>
+      <pose>-1 -1.8 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_09</name>
+      <static>true</static>
+      <pose>-0.2 -0.8 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_10</name>
+      <static>true</static>
+      <pose>0 -2 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_11</name>
+      <static>true</static>
+      <pose>-0.92 0.92 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_oak</uri>
+      <name>tree_oak_12</name>
+      <static>true</static>
+      <pose>0.92 0.92 0 0 0 0</pose>
+    </include>
+
+    <include>
+      <uri>model://models/tree_fir</uri>
+      <name>fir_tree_01</name>
+      <static>true</static>
+      <pose>-5 -2.0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_fir</uri>
+      <name>fir_tree_02</name>
+      <static>true</static>
+      <pose>-4.2 -1.4 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_fir</uri>
+      <name>fir_tree_03</name>
+      <static>true</static>
+      <pose>-5 -0.9 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_fir</uri>
+      <name>fir_tree_04</name>
+      <static>true</static>
+      <pose>-5 0 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_fir</uri>
+      <name>fir_tree_05</name>
+      <static>true</static>
+      <pose>-4.1 0.3 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_fir</uri>
+      <name>fir_tree_06</name>
+      <static>true</static>
+      <pose>-5 1.8 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_fir</uri>
+      <name>fir_tree_07</name>
+      <static>true</static>
+      <pose>-5 0.9 0 0 0 0</pose>
+    </include>
+    <include>
+      <uri>model://models/tree_fir</uri>
+      <name>fir_tree_08</name>
+      <static>true</static>
+      <pose>-1 1.8 0 0 0 0</pose>
+    </include>
+
+    <!-- TREES END -->
+  
+
+  </world>
+</sdf>
